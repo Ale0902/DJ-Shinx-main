@@ -152,6 +152,33 @@ def soccer_synopsis():
 STANDINGS_HEADER = f"{'#':>2} {'Team':<22} {'P':>2} {'W':>2} {'D':>2} {'L':>2} {'GF':>3} {'GA':>3} {'GD':>4} {'Pts':>3}"
 STANDINGS_SEPARATOR = '-' * len(STANDINGS_HEADER)
 
+# Discord renders a subset of ANSI codes inside a ```ansi block (desktop/web
+# only -- mobile just shows the plain, uncolored text).
+ANSI_RESET = "\u001b[0m"
+ANSI_RED = "\u001b[0;31m"
+ANSI_GREEN = "\u001b[0;32m"
+ANSI_BLUE = "\u001b[0;34m"
+ANSI_WHITE = "\u001b[0;37m"
+
+
+def _colorize(text, code):
+    return text if code is None else f"{code}{text}{ANSI_RESET}"
+
+
+def _relegation_color(rank, total):
+    """Bottom 3 spots (the relegation zone) are colored red."""
+    return ANSI_RED if rank > total - 3 else None
+
+
+def _ucl_zone_color(rank, total):
+    """Top 8 (direct Round of 16 qualification) green, 9-24 (knockout
+    round playoffs) blue, the rest (eliminated) white."""
+    if rank <= 8:
+        return ANSI_GREEN
+    if rank <= 24:
+        return ANSI_BLUE
+    return ANSI_WHITE
+
 
 def _stat_map(entry):
     return {stat['name']: stat['displayValue'] for stat in entry['stats']}
@@ -169,15 +196,26 @@ def _standings_row(entry):
     )
 
 
-def _format_standings_table(league_title, entries, limit=1900):
+def _format_standings_table(league_title, entries, color_fn=None, limit=1900):
     """Returns a list of Discord-ready message chunks for the standings
     table. A big table (e.g. UCL's 36-team league phase) can exceed
     Discord's 2000-char limit, so rows are split across multiple messages
     -- each with its own header and closed code fence -- rather than
-    letting a naive character-count split cut a fenced block in half."""
-    data_rows = [_standings_row(entry) for entry in entries]
+    letting a naive character-count split cut a fenced block in half.
 
-    overhead = len(f"## {league_title} Standings\n```\n{STANDINGS_HEADER}\n{STANDINGS_SEPARATOR}\n```")
+    color_fn(rank, total) -> an ANSI color code (or None) lets callers
+    highlight zones like relegation spots or UCL qualification cutoffs."""
+    total = len(entries)
+    data_rows = []
+    for entry in entries:
+        row = _standings_row(entry)
+        if color_fn:
+            rank = int(_stat_map(entry).get('rank') or 0)
+            row = _colorize(row, color_fn(rank, total))
+        data_rows.append(row)
+
+    fence = "ansi" if color_fn else ""
+    overhead = len(f"## {league_title} Standings\n```{fence}\n{STANDINGS_HEADER}\n{STANDINGS_SEPARATOR}\n```")
     longest_row = max((len(row) for row in data_rows), default=0) + 1
     rows_per_chunk = max(1, (limit - overhead) // longest_row)
 
@@ -186,12 +224,12 @@ def _format_standings_table(league_title, entries, limit=1900):
         chunk = data_rows[i:i + rows_per_chunk]
         suffix = "" if i == 0 else " (cont.)"
         body = "\n".join([STANDINGS_HEADER, STANDINGS_SEPARATOR, *chunk])
-        messages.append(f"## {league_title} Standings{suffix}\n```\n{body}\n```")
+        messages.append(f"## {league_title} Standings{suffix}\n```{fence}\n{body}\n```")
 
     return messages or [f"No {league_title} standings available right now."]
 
 
-def _league_standings(league_title, slug):
+def _league_standings(league_title, slug, color_fn=None):
     try:
         data = _fetch_standings(slug)
         entries = data['children'][0]['standings']['entries']
@@ -199,19 +237,19 @@ def _league_standings(league_title, slug):
         return [f"Couldn't reach {league_title} standings right now. Try again later!"]
 
     entries = sorted(entries, key=lambda e: int(_stat_map(e).get('rank') or 0))
-    return _format_standings_table(league_title, entries)
+    return _format_standings_table(league_title, entries, color_fn=color_fn)
 
 
 def premier_league_table():
-    """Returns the current Premier League standings as a list of
-    Discord-ready message chunks."""
-    return _league_standings("Premier League", "eng.1")
+    """Returns the current Premier League standings (relegation zone in
+    red) as a list of Discord-ready message chunks."""
+    return _league_standings("Premier League", "eng.1", color_fn=_relegation_color)
 
 
 def la_liga_table():
-    """Returns the current La Liga standings as a list of Discord-ready
-    message chunks."""
-    return _league_standings("La Liga", "esp.1")
+    """Returns the current La Liga standings (relegation zone in red) as
+    a list of Discord-ready message chunks."""
+    return _league_standings("La Liga", "esp.1", color_fn=_relegation_color)
 
 
 def _ucl_current_phase():
@@ -281,4 +319,4 @@ def ucl_table():
     if phase and phase != 'League Phase':
         return _ucl_bracket(phase)
 
-    return _league_standings("Champions League", "uefa.champions")
+    return _league_standings("Champions League", "uefa.champions", color_fn=_ucl_zone_color)
