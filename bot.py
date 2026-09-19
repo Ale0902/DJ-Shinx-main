@@ -15,10 +15,7 @@ EASTERN = ZoneInfo("America/New_York")
 # Folder that contains this script, so file paths work on Windows and Linux
 BASE = os.path.dirname(os.path.abspath(__file__))
 
-# code.env normally sits one folder up; fall back to this folder if it isn't there
-ENV_PATH = os.path.join(BASE, '..', 'code.env')
-if not os.path.exists(ENV_PATH):
-    ENV_PATH = os.path.join(BASE, 'code.env')
+ENV_PATH = os.path.join(BASE, 'code.env')
 load_dotenv(dotenv_path=ENV_PATH)
 TOKEN = os.getenv('DISCORD_TOKEN')
 
