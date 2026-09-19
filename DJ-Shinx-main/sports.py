@@ -90,7 +90,7 @@ def nfl_synopsis():
     header = f"## NFL Week {week_number} Games!" if week_number else "## This Week's NFL Games!"
 
     lines = [_format_game_line(event) for event in events]
-    return header + "\n\n" + "\n\n".join(lines)
+    return header + "\n" + "\n".join(lines)
 
 
 def soccer_synopsis():
@@ -123,7 +123,7 @@ def soccer_synopsis():
             continue
 
         lines = [_format_game_line(event, is_soccer=True) for event in events]
-        sections.append(f"**{league_name}**\n\n" + "\n\n".join(lines))
+        sections.append(f"**{league_name}**\n" + "\n".join(lines))
 
     if not sections:
         return "Couldn't find any soccer matches this week."
