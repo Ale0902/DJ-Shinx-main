@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import responses
 import botFunctions as bf
 import llmask
+import sports
 import os
 from dotenv import load_dotenv
 
@@ -66,6 +67,20 @@ def run_discord_bot():
     @client.tree.command(name="8ball", description="Shakes an eight ball")
     async def eightball(ctx: discord.Interaction):
         await ctx.response.send_message(bf.eightball())
+
+    @client.tree.command(name="nfl", description="This week's NFL games and live scores")
+    async def nfl(ctx: discord.Interaction):
+        await ctx.response.defer()
+        result = await asyncio.to_thread(sports.nfl_synopsis)
+        for chunk in llmask.chunk_response(result):
+            await ctx.followup.send(chunk)
+
+    @client.tree.command(name="soccer", description="This week's Premier League, La Liga, and Champions League matches")
+    async def soccer(ctx: discord.Interaction):
+        await ctx.response.defer()
+        result = await asyncio.to_thread(sports.soccer_synopsis)
+        for chunk in llmask.chunk_response(result):
+            await ctx.followup.send(chunk)
 
     @client.tree.command(name="status", description="Check the Minecraft server status")
     async def status(ctx: discord.Interaction):
