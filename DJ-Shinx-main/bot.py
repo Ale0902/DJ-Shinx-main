@@ -3,6 +3,7 @@ from discord.ext import commands, tasks
 import asyncio
 import responses
 import botFunctions as bf
+import llmask
 import os
 from dotenv import load_dotenv
 
@@ -67,6 +68,14 @@ def run_discord_bot():
         await ctx.response.defer()
         result = await asyncio.to_thread(bf.mc_status)
         await ctx.followup.send(result)
+
+    @client.tree.command(name="ask", description="Ask DJ Shinx's AI brain a question")
+    @discord.app_commands.describe(question="What do you want to ask?")
+    async def ask(ctx: discord.Interaction, question: str):
+        await ctx.response.defer()
+        result = await asyncio.to_thread(llmask.ask, question)
+        for chunk in llmask.chunk_response(result):
+            await ctx.followup.send(chunk)
 
  #=========================--END SLASH COMMANDS--============================#
 
