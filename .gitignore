@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 *.env
 .env
+release_state.json
+f1_state.json

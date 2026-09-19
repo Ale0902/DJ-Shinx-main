@@ -7,6 +7,7 @@ import responses
 import botFunctions as bf
 import llmask
 import sports
+import f1
 import os
 from dotenv import load_dotenv
 
@@ -136,10 +137,21 @@ def run_discord_bot():
         if batman_announcement:
             await channel.send(batman_announcement)
 
+    @tasks.loop(minutes=15.0)
+    async def f1_updates():
+        channel = client.get_channel(1510340061026058472)
+        if channel is None:
+            return
+
+        messages = await asyncio.to_thread(f1.check_f1_updates)
+        for message in messages:
+            await channel.send(message)
+
     @client.event
     async def on_ready():
         sotd.start()
         new_chapter_announcements.start()
+        f1_updates.start()
         print(f'{client.user} is now running!')
         await client.tree.sync()
 
