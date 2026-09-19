@@ -1,11 +1,15 @@
 import discord
 from discord.ext import commands, tasks
 import asyncio
+import datetime
+from zoneinfo import ZoneInfo
 import responses
 import botFunctions as bf
 import llmask
 import os
 from dotenv import load_dotenv
+
+EASTERN = ZoneInfo("America/New_York")
 
 # Folder that contains this script, so file paths work on Windows and Linux
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -79,7 +83,7 @@ def run_discord_bot():
 
  #=========================--END SLASH COMMANDS--============================#
 
-    @tasks.loop(hours=24.0)
+    @tasks.loop(time=datetime.time(hour=13, minute=0, tzinfo=EASTERN))
     async def sotd():
         channel = client.get_channel(1023430299335532615)
         result = await asyncio.to_thread(bf.recsongs)
