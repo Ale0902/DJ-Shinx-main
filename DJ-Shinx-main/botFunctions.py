@@ -69,50 +69,31 @@ def recsongs():
                 f"\nLink: {link}"
                 )
      
+EIGHTBALL_RESPONSES = [
+     'It is certain',
+     'Reply hazy, try again',
+     "Don't count on it",
+     'It is decidedly so',
+     'Ask again later',
+     'My reply is no',
+     'Without a doubt',
+     'Better not tell you now',
+     'My sources say no',
+     'Yes definitely',
+     'Cannot predict now',
+     'Outlook not so good',
+     'You may rely on it',
+     'Concentrate and ask again',
+     'Very doubtful',
+     'As I see it, yes',
+     'Most likely',
+     'Outlook good',
+     'Yes',
+     'Signs point to yes',
+]
+
 def eightball():
-     roll = random.randint(1,20)
-     if(roll==1):
-          return 'It is certain'
-     elif(roll==2):
-          return 'Reply hazy, try again'
-     elif(roll==3):
-          return "Don't count on it"
-     elif(roll==4):
-          return 'It is decidedly so'
-     elif(roll==5):
-          return 'Ask again later'
-     elif(roll==6):
-          return 'My reply is no'
-     elif(roll==7):
-          return 'Without a doubt'
-     elif(roll==8):
-          return 'Better not tell you now'
-     elif(roll==9):
-          return 'My sources say no'
-     elif(roll==10):
-          return 'Yes definitely'
-     elif(roll==11):
-          return 'Cannot predict now'
-     elif(roll==12):
-          return 'Outlook not so good'
-     elif(roll==13):
-          return 'You may rely on it'
-     elif(roll==14):
-          return 'Concentrate and ask again'
-     elif(roll==15):
-          return 'Very doubtful'
-     elif(roll==16):
-          return 'As I see it, yes'
-     elif(roll==17):
-          return 'Most likely'
-     elif(roll==18):
-          return 'Outlook good'
-     elif(roll==19):
-          return 'Yes'
-     elif(roll==20):
-          return 'Signs point to yes'
-     else:
-          return 'Error, try again.'
+     return random.choice(EIGHTBALL_RESPONSES)
 
 def mc_status():
     server_ip = 'listened-refried.tun.ply.gg'
