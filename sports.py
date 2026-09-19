@@ -70,20 +70,24 @@ def _format_game_line(event, is_soccer=False):
     status = competition.get('status', {})
     state = status.get('type', {}).get('state', 'pre')
 
+    if is_soccer:
+        matchup = f"{home_name} vs {away_name}"
+        matchup_with_scores = f"{home_name} {home['score']} vs {away_name} {away['score']}"
+    else:
+        matchup = f"{away_name} @ {home_name}"
+        matchup_with_scores = f"{away_name} {away['score']} @ {home_name} {home['score']}"
+
     if state == 'in':
         clock = status.get('displayClock', '')
         if is_soccer:
-            return (f"{sport_emoji} 🔴 {day_label}: {away_name} {away['score']} @ "
-                    f"{home_name} {home['score']} ({clock})")
+            return f"{sport_emoji} 🔴 {day_label}: {matchup_with_scores} ({clock})"
         period = status.get('period', '')
-        return (f"{sport_emoji} 🔴 {day_label}: {away_name} {away['score']} @ "
-                f"{home_name} {home['score']} (Q{period}, {clock})")
+        return f"{sport_emoji} 🔴 {day_label}: {matchup_with_scores} (Q{period}, {clock})"
     elif state == 'post':
         detail = status.get('type', {}).get('description', 'Final')
-        return (f"{sport_emoji} {day_label}: {away_name} {away['score']} @ "
-                f"{home_name} {home['score']} ({detail})")
+        return f"{sport_emoji} {day_label}: {matchup_with_scores} ({detail})"
     else:
-        return f"{sport_emoji} {day_label}: {away_name} @ {home_name} — {_format_time(game_time)}"
+        return f"{sport_emoji} {day_label}: {matchup} — {_format_time(game_time)}"
 
 
 def nfl_synopsis():
@@ -245,7 +249,7 @@ def _format_bracket_line(event):
         home_agg = agg_by_id.get(home['id'])
         away_agg = agg_by_id.get(away['id'])
         if home_agg is not None and away_agg is not None:
-            line += f" [Agg: {away['team']['displayName']} {away_agg:g} - {home_agg:g} {home['team']['displayName']}]"
+            line += f" [Agg: {home['team']['displayName']} {home_agg:g} - {away_agg:g} {away['team']['displayName']}]"
 
     return line
 
