@@ -1,11 +1,15 @@
 import iTunes_Scrape
 import csv
+import os
 import random
 from mcstatus import JavaServer
 
+# Folder that contains this script, so file paths work on Windows and Linux
+BASE = os.path.dirname(os.path.abspath(__file__))
+
 def topsongs():
         iTunes_Scrape.updateSongList()
-        with open('F:\DJ-Shinx-main\DJ-Shinx-main\Top_Songs.csv', 'r') as csvfile:
+        with open(os.path.join(BASE, 'Top_Songs.csv'), 'r') as csvfile:
             csv_reader = csv.reader(csvfile, delimiter=',')
             count = 1
             song_name =[]
@@ -30,7 +34,7 @@ def topsongs():
                 )
 
 def recsongs():
-     with open('F:\DJ-Shinx-main\DJ-Shinx-main\SOTD.csv', 'r', encoding='utf-8') as csvfile:
+     with open(os.path.join(BASE, 'SOTD.csv'), 'r', encoding='utf-8') as csvfile:
         csv_reader = csv.reader(csvfile, delimiter=',')
         rows = list(csv_reader)
         rand = random.randrange(1,len(list(rows)))

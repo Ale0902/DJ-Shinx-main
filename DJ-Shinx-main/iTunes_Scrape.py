@@ -1,6 +1,10 @@
 import requests
 from bs4 import BeautifulSoup
 import csv
+import os
+
+# Folder that contains this script, so file paths work on Windows and Linux
+BASE = os.path.dirname(os.path.abspath(__file__))
 
 def updateSongList():
     page = requests.get("https://www.popvortex.com/music/charts/top-100-songs.php")
@@ -9,7 +13,7 @@ def updateSongList():
     list = soup.find(class_="chart-wrapper")
     rows = soup.find_all(class_="title-artist")
 
-    filename = 'F:\DJ-Shinx-main\DJ-Shinx-main\Top_Songs.csv'
+    filename = os.path.join(BASE, 'Top_Songs.csv')
     with open(filename, 'w', newline ='') as csvfile:
         f = csv.writer(csvfile)
         f.writerow(['Song', 'Artist', 'Rank'])
