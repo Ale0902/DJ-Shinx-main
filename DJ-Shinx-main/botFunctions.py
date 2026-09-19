@@ -2,10 +2,18 @@ import iTunes_Scrape
 import csv
 import os
 import random
+import json
+import requests
 from mcstatus import JavaServer
 
 # Folder that contains this script, so file paths work on Windows and Linux
 BASE = os.path.dirname(os.path.abspath(__file__))
+
+# Persists the last-seen chapter/issue so we only announce genuinely new releases
+RELEASE_STATE_FILE = os.path.join(BASE, 'release_state.json')
+
+BERSERK_MANGADEX_ID = '801513ba-a712-498c-8f57-cae55b38cc92'
+ABSOLUTE_BATMAN_VOLUME_ID = '160294'
 
 def topsongs():
         iTunes_Scrape.updateSongList()
@@ -136,3 +144,116 @@ def mc_status():
             f"🔴 **{server_ip} is OFFLINE** (or unreachable).\n"
             "The server may be down or restarting. Try again later!"
         )
+
+def _load_release_state():
+    if os.path.exists(RELEASE_STATE_FILE):
+        with open(RELEASE_STATE_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def _save_release_state(state):
+    with open(RELEASE_STATE_FILE, 'w') as f:
+        json.dump(state, f)
+
+def check_berserk_release():
+    """Checks MangaDex for the latest Berserk chapter.
+
+    Returns an announcement string if a new chapter has appeared since the
+    last check, or None if there's nothing new (or this is the very first
+    check, since there's no prior chapter to compare against yet).
+    """
+    url = f'https://api.mangadex.org/manga/{BERSERK_MANGADEX_ID}/feed'
+    params = {
+        'limit': 1,
+        'translatedLanguage[]': 'en',
+        'order[readableAt]': 'desc',
+        'contentRating[]': ['safe', 'suggestive', 'erotica'],
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json().get('data', [])
+    except Exception:
+        return None
+
+    if not data:
+        return None
+
+    latest = data[0]
+    chapter_num = latest['attributes'].get('chapter')
+    chapter_title = latest['attributes'].get('title') or ''
+    chapter_id = latest['id']
+
+    state = _load_release_state()
+    previous = state.get('berserk_chapter')
+    if previous == chapter_num:
+        return None
+
+    state['berserk_chapter'] = chapter_num
+    _save_release_state(state)
+
+    if previous is None:
+        return None
+
+    title_part = f": {chapter_title}" if chapter_title else ''
+    return (
+        "⚔️ **New Berserk Chapter Released!**\n"
+        f"**Chapter {chapter_num}**{title_part}\n"
+        f"Read it here: https://mangadex.org/chapter/{chapter_id}"
+    )
+
+def check_absolute_batman_release():
+    """Checks Comic Vine for the latest Absolute Batman issue.
+
+    Returns an announcement string if a new issue has appeared since the
+    last check, or None if there's nothing new, the API key isn't
+    configured, or this is the very first check.
+    """
+    api_key = os.getenv('COMICVINE_API_KEY')
+    if not api_key:
+        return None
+
+    url = 'https://comicvine.gamespot.com/api/issues/'
+    params = {
+        'api_key': api_key,
+        'format': 'json',
+        'filter': f'volume:{ABSOLUTE_BATMAN_VOLUME_ID}',
+        'sort': 'cover_date:desc',
+        'limit': 1,
+        'field_list': 'id,name,issue_number,cover_date,site_detail_url',
+    }
+    headers = {'User-Agent': 'DJ-Shinx-Bot/1.0'}
+
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response.raise_for_status()
+        results = response.json().get('results', [])
+    except Exception:
+        return None
+
+    if not results:
+        return None
+
+    latest = results[0]
+    issue_number = latest.get('issue_number')
+
+    state = _load_release_state()
+    previous = state.get('absolute_batman_issue')
+    if previous == issue_number:
+        return None
+
+    state['absolute_batman_issue'] = issue_number
+    _save_release_state(state)
+
+    if previous is None:
+        return None
+
+    title = latest.get('name') or f'Absolute Batman #{issue_number}'
+    link = latest.get('site_detail_url', '')
+    link_part = f"\nMore info: {link}" if link else ''
+
+    return (
+        "🦇 **New Absolute Batman Issue Released!**\n"
+        f"**Issue #{issue_number}: {title}**{link_part}"
+    )

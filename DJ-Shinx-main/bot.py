@@ -76,9 +76,24 @@ def run_discord_bot():
         result = await asyncio.to_thread(bf.recsongs)
         await channel.send(result)
 
+    @tasks.loop(hours=6.0)
+    async def new_chapter_announcements():
+        channel = client.get_channel(748287973795168346)
+        if channel is None:
+            return
+
+        berserk_announcement = await asyncio.to_thread(bf.check_berserk_release)
+        if berserk_announcement:
+            await channel.send(berserk_announcement)
+
+        batman_announcement = await asyncio.to_thread(bf.check_absolute_batman_release)
+        if batman_announcement:
+            await channel.send(batman_announcement)
+
     @client.event
     async def on_ready():
         sotd.start()
+        new_chapter_announcements.start()
         print(f'{client.user} is now running!')
         await client.tree.sync()
 
