@@ -233,6 +233,23 @@ def _ucl_current_phase():
     return None
 
 
+def _format_bracket_line(event):
+    line = _format_game_line(event, is_soccer=True)
+
+    competition = event['competitions'][0]
+    series = competition.get('series')
+    if series and series.get('completed'):
+        agg_by_id = {c['id']: c.get('aggregateScore') for c in series.get('competitors', [])}
+        home = next(c for c in competition['competitors'] if c['homeAway'] == 'home')
+        away = next(c for c in competition['competitors'] if c['homeAway'] == 'away')
+        home_agg = agg_by_id.get(home['id'])
+        away_agg = agg_by_id.get(away['id'])
+        if home_agg is not None and away_agg is not None:
+            line += f" [Agg: {away['team']['displayName']} {away_agg:g} - {home_agg:g} {home['team']['displayName']}]"
+
+    return line
+
+
 def _ucl_bracket(phase_label):
     """Returns the current knockout-round matchups (with aggregate score,
     when ESPN provides one for a two-legged tie) once UCL has moved past
@@ -247,14 +264,7 @@ def _ucl_bracket(phase_label):
     if not events:
         return [f"## UEFA Champions League — {phase_label}\nNo matches scheduled yet for this round."]
 
-    lines = []
-    for event in sorted(events, key=lambda e: e['date']):
-        line = _format_game_line(event, is_soccer=True)
-        series = event['competitions'][0].get('series')
-        if series and series.get('summary'):
-            line += f" [Agg: {series['summary']}]"
-        lines.append(line)
-
+    lines = [_format_bracket_line(event) for event in sorted(events, key=lambda e: e['date'])]
     return [f"## UEFA Champions League — {phase_label}\n" + "\n".join(lines)]
 
 
