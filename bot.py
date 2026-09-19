@@ -79,6 +79,27 @@ def run_discord_bot():
         for chunk in llmask.chunk_response(result):
             await ctx.followup.send(chunk)
 
+    @client.tree.command(name="premtable", description="Current Premier League standings")
+    async def premtable(ctx: discord.Interaction):
+        await ctx.response.defer()
+        messages = await asyncio.to_thread(sports.premier_league_table)
+        for message in messages:
+            await ctx.followup.send(message)
+
+    @client.tree.command(name="laligatable", description="Current La Liga standings")
+    async def laligatable(ctx: discord.Interaction):
+        await ctx.response.defer()
+        messages = await asyncio.to_thread(sports.la_liga_table)
+        for message in messages:
+            await ctx.followup.send(message)
+
+    @client.tree.command(name="ucltable", description="Current Champions League standings or bracket")
+    async def ucltable(ctx: discord.Interaction):
+        await ctx.response.defer()
+        messages = await asyncio.to_thread(sports.ucl_table)
+        for message in messages:
+            await ctx.followup.send(message)
+
     @client.tree.command(name="status", description="Check the Minecraft server status")
     async def status(ctx: discord.Interaction):
         await ctx.response.defer()
