@@ -82,15 +82,6 @@ def run_discord_bot():
         print(f'{client.user} is now running!')
         await client.tree.sync()
 
-    @client.event
-    async def on_message(message):
-        if message.author == client.user:
-            return
-        username = str(message.author)
-        user_message = str(message.content)
-        channel = str(message.channel)
-        print(f'{username} said: {user_message} in channel: ({channel})')
-
     client.run(TOKEN)
 
 
