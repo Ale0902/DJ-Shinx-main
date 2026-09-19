@@ -1,24 +1,20 @@
 import os
 import requests
 
-# Point this at the Ollama server running on the Linux Mint VM, e.g. http://192.168.1.50:11434
-# Ollama only listens on localhost by default, so on the VM you need to set:
-#   OLLAMA_HOST=0.0.0.0:11434
-# before starting `ollama serve` (or in its systemd unit), and make sure the VM's
-# firewall / network mode (bridged, not NAT-only) actually lets this machine reach it.
-OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
-OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'llama3')
-
+# Point this at the Ollama server via OLLAMA_URL/OLLAMA_MODEL in code.env.
+# Read lazily (not at import time) since bot.py loads code.env after importing this module.
 MAX_DISCORD_LEN = 2000
 
 
 def ask(question: str) -> str:
     """Sends a question to the Ollama LLM and returns its reply as a string."""
+    ollama_url = os.getenv('OLLAMA_URL', 'http://localhost:11434')
+    ollama_model = os.getenv('OLLAMA_MODEL', 'llama3')
     try:
         response = requests.post(
-            f'{OLLAMA_URL}/api/generate',
+            f'{ollama_url}/api/generate',
             json={
-                'model': OLLAMA_MODEL,
+                'model': ollama_model,
                 'prompt': question,
                 'stream': False,
             },
