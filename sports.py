@@ -10,6 +10,9 @@ from zoneinfo import ZoneInfo
 ESPN_SITE_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 ESPN_STANDINGS_BASE = "https://site.api.espn.com/apis/v2/sports"
 NFL_SCOREBOARD_URL = f"{ESPN_SITE_BASE}/football/nfl/scoreboard"
+CFB_SCOREBOARD_URL = f"{ESPN_SITE_BASE}/football/college-football/scoreboard"
+
+USF_TEAM_ID = "58"  # South Florida Bulls, per ESPN
 
 SOCCER_LEAGUES = [
     ("Premier League", "eng.1"),
@@ -24,10 +27,12 @@ def _soccer_scoreboard_url(slug):
     return f"{ESPN_SITE_BASE}/soccer/{slug}/scoreboard"
 
 
-def _fetch_scoreboard(url, date=None):
+def _fetch_scoreboard(url, date=None, params=None):
+    request_params = dict(params or {})
     # ESPN's `dates` filter only accepts a single YYYYMMDD day, not a range.
-    params = {'dates': date.strftime('%Y%m%d')} if date else {}
-    response = requests.get(url, params=params, timeout=10)
+    if date:
+        request_params['dates'] = date.strftime('%Y%m%d')
+    response = requests.get(url, params=request_params, timeout=10)
     response.raise_for_status()
     return response.json()
 
@@ -52,7 +57,7 @@ def _format_time(dt):
     return dt.strftime('%I:%M %p ET').lstrip('0')
 
 
-def _format_game_line(event, is_soccer=False):
+def _format_game_line(event, is_soccer=False, label_fn=None):
     sport_emoji = '⚽' if is_soccer else '🏈'
 
     competition = event['competitions'][0]
@@ -60,8 +65,9 @@ def _format_game_line(event, is_soccer=False):
     home = next(c for c in competitors if c['homeAway'] == 'home')
     away = next(c for c in competitors if c['homeAway'] == 'away')
 
-    home_name = home['team']['displayName']
-    away_name = away['team']['displayName']
+    label_fn = label_fn or (lambda c: c['team']['displayName'])
+    home_name = label_fn(home)
+    away_name = label_fn(away)
 
     game_time = datetime.datetime.fromisoformat(event['date'].replace('Z', '+00:00'))
     game_time = game_time.astimezone(EASTERN)
@@ -108,6 +114,70 @@ def nfl_synopsis():
 
     lines = [_format_game_line(event) for event in events]
     return header + "\n" + "\n".join(lines)
+
+
+def _cfb_rank(competitor):
+    rank = competitor.get('curatedRank', {}).get('current')
+    return rank if rank and rank <= 25 else None
+
+
+def _cfb_label(competitor):
+    name = competitor['team']['displayName']
+    rank = _cfb_rank(competitor)
+    if rank:
+        name = f"#{rank} {name}"
+    if competitor['team']['id'] == USF_TEAM_ID:
+        name = f"⭐ {name}"
+    return name
+
+
+def _cfb_involves_usf(event):
+    return any(c['team']['id'] == USF_TEAM_ID for c in event['competitions'][0]['competitors'])
+
+
+def _cfb_involves_ranked_team(event):
+    return any(_cfb_rank(c) for c in event['competitions'][0]['competitors'])
+
+
+def cfb_synopsis():
+    """Returns a compressed synopsis of this week's Division I FBS college
+    football games. The full FBS slate runs 60-75+ games a week -- far too
+    much for one Discord message -- so this focuses on South Florida's game
+    (always shown) plus every game involving a ranked (Top 25) team."""
+    try:
+        # ESPN's default scoreboard only returns a small curated subset.
+        # groups=80 selects FBS and a high limit pulls the full week's slate.
+        data = _fetch_scoreboard(CFB_SCOREBOARD_URL, params={'groups': 80, 'limit': 400})
+    except Exception:
+        return "Couldn't reach the college football scores right now. Try again later!"
+
+    events = data.get('events', [])
+    if not events:
+        return "No college football games scheduled this week."
+
+    week_number = data.get('week', {}).get('number')
+    header = f"## College Football Week {week_number}!" if week_number else "## This Week's College Football Games!"
+
+    usf_games = sorted((e for e in events if _cfb_involves_usf(e)), key=lambda e: e['date'])
+    usf_event_ids = {e['id'] for e in usf_games}
+    ranked_games = sorted(
+        (e for e in events if e['id'] not in usf_event_ids and _cfb_involves_ranked_team(e)),
+        key=lambda e: e['date'],
+    )
+
+    sections = []
+    if usf_games:
+        lines = [_format_game_line(event, label_fn=_cfb_label) for event in usf_games]
+        sections.append("**South Florida Bulls**\n" + "\n".join(lines))
+
+    if ranked_games:
+        lines = [_format_game_line(event, label_fn=_cfb_label) for event in ranked_games]
+        sections.append("**Top 25 Games**\n" + "\n".join(lines))
+
+    if not sections:
+        return header + "\nNo ranked matchups or USF game found this week."
+
+    return header + "\n\n" + "\n\n".join(sections)
 
 
 def soccer_synopsis():
