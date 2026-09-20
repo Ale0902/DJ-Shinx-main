@@ -67,8 +67,8 @@ def _format_game_line(event, is_soccer=False, label_fn=None):
     away = next(c for c in competitors if c['homeAway'] == 'away')
 
     label_fn = label_fn or (lambda c: c['team']['displayName'])
-    home_name = label_fn(home)
-    away_name = label_fn(away)
+    home_name = f"**{label_fn(home)}**"
+    away_name = f"**{label_fn(away)}**"
 
     game_time = datetime.datetime.fromisoformat(event['date'].replace('Z', '+00:00'))
     game_time = game_time.astimezone(EASTERN)
@@ -241,8 +241,8 @@ def _mlb_series_line(games):
     games = sorted(games, key=lambda e: e['date'])
     competition = games[0]['competitions'][0]
     competitors = competition['competitors']
-    home_name = next(c for c in competitors if c['homeAway'] == 'home')['team']['shortDisplayName']
-    away_name = next(c for c in competitors if c['homeAway'] == 'away')['team']['shortDisplayName']
+    home_name = f"**{next(c for c in competitors if c['homeAway'] == 'home')['team']['shortDisplayName']}**"
+    away_name = f"**{next(c for c in competitors if c['homeAway'] == 'away')['team']['shortDisplayName']}**"
 
     first_date = datetime.datetime.fromisoformat(games[0]['date'].replace('Z', '+00:00')).astimezone(EASTERN)
     last_date = datetime.datetime.fromisoformat(games[-1]['date'].replace('Z', '+00:00')).astimezone(EASTERN)
