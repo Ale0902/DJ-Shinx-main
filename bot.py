@@ -19,11 +19,13 @@ EASTERN = ZoneInfo("America/New_York")
 COMMAND_CATEGORIES = {
     'nfl': 'Sports',
     'nfllive': 'Sports',
+    'nflresults': 'Sports',
     'nflstandings': 'Sports',
     'cfb': 'Sports',
     'mlb': 'Sports',
     'soccer': 'Sports',
     'livesoccer': 'Sports',
+    'soccerresults': 'Sports',
     'prem': 'Sports',
     'laliga': 'Sports',
     'ucl': 'Sports',
@@ -165,6 +167,13 @@ def run_discord_bot():
         for chunk in llmask.chunk_response(result):
             await ctx.send(chunk)
 
+    @client.hybrid_command(name="nflresults", description="Today's finished NFL games and final scores")
+    async def nflresults(ctx: commands.Context):
+        await ctx.defer()
+        result = await asyncio.to_thread(sports.nfl_results_today)
+        for chunk in llmask.chunk_response(result):
+            await ctx.send(chunk)
+
     @client.hybrid_command(name="cfb", description="This week's ranked college football games, with a South Florida spotlight")
     async def cfb(ctx: commands.Context):
         await ctx.defer()
@@ -202,6 +211,13 @@ def run_discord_bot():
     async def livesoccer(ctx: commands.Context):
         await ctx.defer()
         result = await asyncio.to_thread(sports.live_soccer_matches)
+        for chunk in llmask.chunk_response(result):
+            await ctx.send(chunk)
+
+    @client.hybrid_command(name="soccerresults", description="Today's finished soccer matches and final scores")
+    async def soccerresults(ctx: commands.Context):
+        await ctx.defer()
+        result = await asyncio.to_thread(sports.soccer_results_today)
         for chunk in llmask.chunk_response(result):
             await ctx.send(chunk)
 

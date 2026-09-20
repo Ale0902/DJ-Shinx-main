@@ -157,6 +157,23 @@ def nfl_live_matches():
     return "## Live NFL Right Now!\n" + "\n".join(lines)
 
 
+def nfl_results_today():
+    """Returns the final score of every NFL game that finished today --
+    unlike /nfl, this excludes in-progress and upcoming games entirely."""
+    try:
+        data = _fetch_scoreboard(NFL_SCOREBOARD_URL)
+    except Exception:
+        return "Couldn't reach the NFL scores right now. Try again later!"
+
+    today = datetime.datetime.now(EASTERN).date()
+    events = [event for event in data.get('events', []) if _is_final(event) and _event_date(event) == today]
+    if not events:
+        return "No NFL games have finished today."
+
+    lines = [_format_game_line(event) for event in events]
+    return "## Today's NFL Results!\n" + "\n".join(lines)
+
+
 def _nfl_stat(entry, name):
     for stat in entry['stats']:
         if stat['name'] == name:
@@ -494,6 +511,15 @@ def _is_live(event):
     return status.get('type', {}).get('state') == 'in'
 
 
+def _is_final(event):
+    status = event['competitions'][0].get('status', {})
+    return status.get('type', {}).get('state') == 'post'
+
+
+def _event_date(event):
+    return datetime.datetime.fromisoformat(event['date'].replace('Z', '+00:00')).astimezone(EASTERN).date()
+
+
 def _match_event_lines(competition):
     """Returns "12' ⚽ Player Name (Team)" / "34' 🟥 Player Name (Team)"
     lines, in chronological order, for every goal and red card in a
@@ -568,6 +594,41 @@ def live_soccer_matches():
         return "No soccer matches currently in progress."
 
     return "## Live Soccer Right Now!\n\n" + "\n\n".join(sections)
+
+
+def soccer_results_today():
+    """Returns the final score of every soccer match that finished today,
+    across every tracked competition -- unlike /soccer, this excludes
+    in-progress and upcoming matches entirely."""
+    today = datetime.datetime.now(EASTERN).date()
+    jobs = [(name, slug) for name, slugs in SOCCER_COMPETITIONS for slug in slugs]
+
+    def fetch(job):
+        name, slug = job
+        try:
+            events = _fetch_scoreboard(_soccer_scoreboard_url(slug), date=today).get('events', [])
+        except Exception:
+            events = []
+        return name, [e for e in events if _is_final(e)]
+
+    results_by_competition = {name: {} for name, _ in SOCCER_COMPETITIONS}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(jobs))) as executor:
+        for name, events in executor.map(fetch, jobs):
+            for event in events:
+                results_by_competition[name][event['id']] = event
+
+    sections = []
+    for name, _ in SOCCER_COMPETITIONS:
+        events = sorted(results_by_competition[name].values(), key=lambda e: e['date'])
+        if not events:
+            continue
+        lines = [_format_game_line(event, is_soccer=True) for event in events]
+        sections.append(f"**{name}**\n" + "\n".join(lines))
+
+    if not sections:
+        return "No soccer results yet today."
+
+    return "## Today's Soccer Results!\n\n" + "\n\n".join(sections)
 
 
 STANDINGS_HEADER = f"{'':2}{'#':>2} {'Team':<22} {'P':>2} {'W':>2} {'D':>2} {'L':>2} {'GF':>3} {'GA':>3} {'GD':>4} {'Pts':>3}"
