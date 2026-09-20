@@ -279,7 +279,7 @@ def run_discord_bot():
     @client.hybrid_command(name="ask", description="Ask DJ Shinx's AI brain a question")
     @discord.app_commands.describe(question="What do you want to ask?")
     async def ask(ctx: commands.Context, *, question: str):
-        await ctx.send(f"**Question:** {question}")
+        await ctx.send(f"**Question from {ctx.author.display_name}:** {question}")
         result = await asyncio.to_thread(llmask.ask, question)
         for chunk in llmask.chunk_response(result):
             await ctx.send(chunk)
