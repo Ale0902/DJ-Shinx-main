@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 # "core" API is needed for per-driver results (place/time) and circuit info,
 # since the site API's embedded competitors don't carry that data.
 F1_SITE_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard"
+F1_SITE_STANDINGS = "https://site.api.espn.com/apis/v2/sports/racing/f1/standings"
 F1_CORE_BASE = "https://sports.core.api.espn.com/v2/sports/racing/leagues/f1"
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -202,3 +203,87 @@ def check_f1_updates():
 
     _save_state(state)
     return messages
+
+
+def f1_status():
+    """Returns whether it's currently an F1 race weekend, and if so, which
+    session(s) are happening today."""
+    try:
+        event = _current_event()
+    except Exception:
+        return "Couldn't reach the F1 schedule right now. Try again later!"
+
+    if not event:
+        return "No upcoming F1 event found."
+
+    weekend_start = datetime.datetime.fromisoformat(event['date'].replace('Z', '+00:00')).astimezone(EASTERN).date()
+    weekend_end = datetime.datetime.fromisoformat(event['endDate'].replace('Z', '+00:00')).astimezone(EASTERN).date()
+    today = datetime.datetime.now(EASTERN).date()
+
+    if weekend_start <= today <= weekend_end:
+        competitions = sorted(event.get('competitions', []), key=lambda c: c['date'])
+        todays = [
+            c for c in competitions
+            if datetime.datetime.fromisoformat(c['date'].replace('Z', '+00:00')).astimezone(EASTERN).date() == today
+        ]
+        if todays:
+            labels = ", ".join(SESSION_LABELS.get(c['type']['abbreviation'], c['type']['abbreviation']) for c in todays)
+            today_text = f"\nToday: {labels}"
+        else:
+            today_text = ""
+        return f"🏎️🏁 Yes, it's race weekend!\n**{event['name']}**{today_text}"
+
+    days_until = (weekend_start - today).days
+    day_word = "day" if days_until == 1 else "days"
+    return (
+        f"🚦 No, it's not race weekend.\n"
+        f"Next up: **{event['name']}** in {days_until} {day_word} ({weekend_start.strftime('%B %d')})."
+    )
+
+
+def _f1_standings_table(title, entries, name_fn):
+    def stat_map(entry):
+        return {stat['name']: stat.get('displayValue') for stat in entry['stats']}
+
+    def sort_key(entry):
+        try:
+            return int(float(stat_map(entry).get('rank') or 0))
+        except (TypeError, ValueError):
+            return 999
+
+    entries = sorted(entries, key=sort_key)
+
+    header = f"{'#':>2} {'Name':<24} {'Pts':>4}"
+    rows = [header, '-' * len(header)]
+    for entry in entries:
+        stats = stat_map(entry)
+        rank = stats.get('rank', '-')
+        points = stats.get('championshipPts') or stats.get('points') or '-'
+        rows.append(f"{rank:>2} {name_fn(entry):<24.24} {points:>4}")
+
+    table = "\n".join(rows)
+    return f"## {title}\n```\n{table}\n```"
+
+
+def f1_standings():
+    """Returns the current F1 drivers' and constructors' championship
+    standings as a list of Discord-ready message chunks."""
+    try:
+        data = _fetch_json(F1_SITE_STANDINGS)
+        children = {child['name']: child for child in data.get('children', [])}
+    except Exception:
+        return ["Couldn't reach F1 standings right now. Try again later!"]
+
+    messages = []
+
+    drivers = children.get('Driver Standings')
+    if drivers:
+        entries = drivers['standings']['entries']
+        messages.append(_f1_standings_table("Driver Standings", entries, lambda e: e['athlete']['displayName']))
+
+    constructors = children.get('Constructor Standings')
+    if constructors:
+        entries = constructors['standings']['entries']
+        messages.append(_f1_standings_table("Constructor Standings", entries, lambda e: e['team']['displayName']))
+
+    return messages or ["No F1 standings available right now."]

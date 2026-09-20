@@ -101,6 +101,19 @@ def run_discord_bot():
         for message in messages:
             await ctx.followup.send(message)
 
+    @client.tree.command(name="f1", description="Is it F1 race weekend right now?")
+    async def f1cmd(ctx: discord.Interaction):
+        await ctx.response.defer()
+        result = await asyncio.to_thread(f1.f1_status)
+        await ctx.followup.send(result)
+
+    @client.tree.command(name="f1standings", description="Current F1 drivers' and constructors' championship standings")
+    async def f1standings(ctx: discord.Interaction):
+        await ctx.response.defer()
+        messages = await asyncio.to_thread(f1.f1_standings)
+        for message in messages:
+            await ctx.followup.send(message)
+
     @client.tree.command(name="status", description="Check the Minecraft server status")
     async def status(ctx: discord.Interaction):
         await ctx.response.defer()
