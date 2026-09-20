@@ -80,6 +80,13 @@ def run_discord_bot():
         for chunk in llmask.chunk_response(result):
             await ctx.followup.send(chunk)
 
+    @client.tree.command(name="mlb", description="This week's MLB series and their records")
+    async def mlb(ctx: discord.Interaction):
+        await ctx.response.defer()
+        result = await asyncio.to_thread(sports.mlb_series_synopsis)
+        for chunk in llmask.chunk_response(result):
+            await ctx.followup.send(chunk)
+
     @client.tree.command(name="soccer", description="This week's Premier League, La Liga, and Champions League matches")
     async def soccer(ctx: discord.Interaction):
         await ctx.response.defer()

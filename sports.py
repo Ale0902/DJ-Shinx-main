@@ -11,6 +11,7 @@ ESPN_SITE_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 ESPN_STANDINGS_BASE = "https://site.api.espn.com/apis/v2/sports"
 NFL_SCOREBOARD_URL = f"{ESPN_SITE_BASE}/football/nfl/scoreboard"
 CFB_SCOREBOARD_URL = f"{ESPN_SITE_BASE}/football/college-football/scoreboard"
+MLB_SCOREBOARD_URL = f"{ESPN_SITE_BASE}/baseball/mlb/scoreboard"
 
 USF_TEAM_ID = "58"  # South Florida Bulls, per ESPN
 
@@ -178,6 +179,90 @@ def cfb_synopsis():
         return header + "\nNo ranked matchups or USF game found this week."
 
     return header + "\n\n" + "\n\n".join(sections)
+
+
+def _mlb_series_record(games):
+    """Returns (home_wins, away_wins, all_completed) across a group of
+    games between the same two teams."""
+    home_wins = away_wins = 0
+    completed_count = 0
+    for game in games:
+        competition = game['competitions'][0]
+        if not competition.get('status', {}).get('type', {}).get('completed'):
+            continue
+        completed_count += 1
+        competitors = competition['competitors']
+        home = next(c for c in competitors if c['homeAway'] == 'home')
+        away = next(c for c in competitors if c['homeAway'] == 'away')
+        if int(home['score']) > int(away['score']):
+            home_wins += 1
+        elif int(away['score']) > int(home['score']):
+            away_wins += 1
+
+    return home_wins, away_wins, completed_count == len(games)
+
+
+def _mlb_series_line(games):
+    games = sorted(games, key=lambda e: e['date'])
+    competition = games[0]['competitions'][0]
+    competitors = competition['competitors']
+    home_name = next(c for c in competitors if c['homeAway'] == 'home')['team']['displayName']
+    away_name = next(c for c in competitors if c['homeAway'] == 'away')['team']['displayName']
+
+    first_date = datetime.datetime.fromisoformat(games[0]['date'].replace('Z', '+00:00')).astimezone(EASTERN)
+    last_date = datetime.datetime.fromisoformat(games[-1]['date'].replace('Z', '+00:00')).astimezone(EASTERN)
+    if first_date.date() == last_date.date():
+        date_range = first_date.strftime('%A (%m/%d)')
+    else:
+        date_range = f"{first_date.strftime('%a %m/%d')}-{last_date.strftime('%a %m/%d')}"
+
+    home_wins, away_wins, all_completed = _mlb_series_record(games)
+
+    record = ""
+    if home_wins or away_wins:
+        if home_wins == away_wins:
+            record = f" — Tied {home_wins}-{away_wins}"
+        else:
+            leader, leader_wins, other_wins = (
+                (home_name, home_wins, away_wins) if home_wins > away_wins
+                else (away_name, away_wins, home_wins)
+            )
+            verb = "won" if all_completed else "leads"
+            record = f" — {leader} {verb} {leader_wins}-{other_wins}"
+
+    game_word = "game" if len(games) == 1 else "games"
+    return games[0]['date'], f"⚾ {away_name} @ {home_name} ({date_range}, {len(games)} {game_word}){record}"
+
+
+def mlb_series_synopsis():
+    """Returns this week's MLB matchups grouped into series (rather than
+    every individual game, which would run 90+ games/week) with each
+    series' overall record so far."""
+    week_dates = _week_dates(start_weekday=0)
+
+    events_by_id = {}
+    for day in week_dates:
+        try:
+            data = _fetch_scoreboard(MLB_SCOREBOARD_URL, date=day)
+        except Exception:
+            continue
+        for event in data.get('events', []):
+            events_by_id[event['id']] = event
+
+    if not events_by_id:
+        return "No MLB games scheduled this week."
+
+    series_map = {}
+    for event in events_by_id.values():
+        competitors = event['competitions'][0]['competitors']
+        home_id = next(c for c in competitors if c['homeAway'] == 'home')['team']['id']
+        away_id = next(c for c in competitors if c['homeAway'] == 'away')['team']['id']
+        series_map.setdefault((home_id, away_id), []).append(event)
+
+    lines = sorted((_mlb_series_line(games) for games in series_map.values()), key=lambda item: item[0])
+
+    header = "## This Week's MLB Series!"
+    return header + "\n" + "\n".join(line for _, line in lines)
 
 
 def soccer_synopsis():
