@@ -149,6 +149,13 @@ def run_discord_bot():
         message = await ctx.followup.send(view.content(), view=view)
         view.message = message
 
+    @client.tree.command(name="currentsoccer", description="Only soccer matches currently in progress")
+    async def currentsoccer(ctx: discord.Interaction):
+        await ctx.response.defer()
+        result = await asyncio.to_thread(sports.live_soccer_matches)
+        for chunk in llmask.chunk_response(result):
+            await ctx.followup.send(chunk)
+
     @client.tree.command(name="premtable", description="Current Premier League standings")
     async def premtable(ctx: discord.Interaction):
         await ctx.response.defer()

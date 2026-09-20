@@ -390,6 +390,46 @@ def soccer_pages():
     return pages
 
 
+def _is_live(event):
+    status = event['competitions'][0].get('status', {})
+    return status.get('type', {}).get('state') == 'in'
+
+
+def live_soccer_matches():
+    """Returns a single synopsis of only the soccer matches currently in
+    progress, across every tracked competition -- unlike /soccer, this
+    excludes finished and upcoming matches entirely."""
+    today = datetime.datetime.now(EASTERN).date()
+    jobs = [(name, slug) for name, slugs in SOCCER_COMPETITIONS for slug in slugs]
+
+    def fetch(job):
+        name, slug = job
+        try:
+            events = _fetch_scoreboard(_soccer_scoreboard_url(slug), date=today).get('events', [])
+        except Exception:
+            events = []
+        return name, [e for e in events if _is_live(e)]
+
+    live_by_competition = {name: {} for name, _ in SOCCER_COMPETITIONS}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(jobs))) as executor:
+        for name, events in executor.map(fetch, jobs):
+            for event in events:
+                live_by_competition[name][event['id']] = event
+
+    sections = []
+    for name, _ in SOCCER_COMPETITIONS:
+        events = sorted(live_by_competition[name].values(), key=lambda e: e['date'])
+        if not events:
+            continue
+        lines = [_format_game_line(event, is_soccer=True) for event in events]
+        sections.append(f"**{name}**\n" + "\n".join(lines))
+
+    if not sections:
+        return "No soccer matches currently in progress."
+
+    return "## Live Soccer Right Now!\n\n" + "\n\n".join(sections)
+
+
 STANDINGS_HEADER = f"{'#':>2} {'Team':<22} {'P':>2} {'W':>2} {'D':>2} {'L':>2} {'GF':>3} {'GA':>3} {'GD':>4} {'Pts':>3}"
 STANDINGS_SEPARATOR = '-' * len(STANDINGS_HEADER)
 
