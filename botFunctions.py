@@ -3,8 +3,11 @@ import csv
 import os
 import random
 import json
+import logging
 import requests
 from mcstatus import JavaServer
+
+logger = logging.getLogger(__name__)
 
 # Folder that contains this script, so file paths work on Windows and Linux
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -15,87 +18,60 @@ RELEASE_STATE_FILE = os.path.join(BASE, 'release_state.json')
 BERSERK_MANGADEX_ID = '801513ba-a712-498c-8f57-cae55b38cc92'
 ABSOLUTE_BATMAN_VOLUME_ID = '160294'
 
-def topsongs():
-        iTunes_Scrape.updateSongList()
-        with open(os.path.join(BASE, 'Top_Songs.csv'), 'r') as csvfile:
-            csv_reader = csv.reader(csvfile, delimiter=',')
-            count = 1
-            song_name =[]
-            artist =[]
-            rank =[]
 
-            for row in csv_reader:
-                song_name.append(row[0])
-                artist.append(row[1])
-                rank.append(row[2])
-                count += 1
+def topsongs() -> str:
+    iTunes_Scrape.updateSongList()
+    with open(os.path.join(BASE, 'Top_Songs.csv'), 'r', encoding='utf-8') as csvfile:
+        top_five = list(csv.DictReader(csvfile))[:5]
 
-                if(count > 6):
-                    break   
-        return ("## The Top 5 Songs on iTunes Right Now!\n"
-                f"**Rank:** {rank[1]}\n*{song_name[1]}*, {artist[1]}\n"
-                f"**Rank:** {rank[2]}\n*{song_name[2]}*, {artist[2]}\n"
-                f"**Rank:** {rank[3]}\n*{song_name[3]}*, {artist[3]}\n"
-                f"**Rank:** {rank[4]}\n*{song_name[4]}*, {artist[4]}\n"
-                f"**Rank:** {rank[5]}\n*{song_name[5]}*, {artist[5]}\n"
-                "\nSource: https://www.popvortex.com/music/charts/top-100-songs.php"
-                )
+    lines = ["## The Top 5 Songs on iTunes Right Now!"]
+    lines.extend(f"**Rank:** {row['Rank']}\n*{row['Song']}*, {row['Artist']}" for row in top_five)
+    return "\n".join(lines) + "\n\nSource: https://www.popvortex.com/music/charts/top-100-songs.php"
 
-def recsongs():
-     with open(os.path.join(BASE, 'SOTD.csv'), 'r', encoding='utf-8') as csvfile:
-        csv_reader = csv.reader(csvfile, delimiter=',')
-        rows = list(csv_reader)
-        rand = random.randrange(1,len(list(rows)))
-        count = 0
-        songname = []
-        artist = []
-        link = []
-        name = []
 
-        for row in rows:
-            count += 1
-            if(count == rand):
-                songname = row[0]
-                artist= row[1]
-                link = row[2]
-                name =row[3]
-                #rows.remove(row)
-                break
+def recsongs() -> str:
+    with open(os.path.join(BASE, 'SOTD.csv'), 'r', encoding='utf-8') as csvfile:
+        rows = list(csv.DictReader(csvfile))
 
-        return ("### SOTD!:\n"
-                f"\n**Song:** {songname}\n"
-                f"**Artist:** {artist}\n"
-                f"**Submitted by:** {name}\n"
-                f"\nLink: {link}"
-                )
-     
+    row = random.choice(rows)
+    return (
+        "### SOTD!:\n"
+        f"\n**Song:** {row['Song Title']}\n"
+        f"**Artist:** {row['Artist']}\n"
+        f"**Submitted by:** {row['Your name (or tag)']}\n"
+        f"\nLink: {row['Spotify or YouTube link']}"
+    )
+
+
 EIGHTBALL_RESPONSES = [
-     'It is certain',
-     'Reply hazy, try again',
-     "Don't count on it",
-     'It is decidedly so',
-     'Ask again later',
-     'My reply is no',
-     'Without a doubt',
-     'Better not tell you now',
-     'My sources say no',
-     'Yes definitely',
-     'Cannot predict now',
-     'Outlook not so good',
-     'You may rely on it',
-     'Concentrate and ask again',
-     'Very doubtful',
-     'As I see it, yes',
-     'Most likely',
-     'Outlook good',
-     'Yes',
-     'Signs point to yes',
+    'It is certain',
+    'Reply hazy, try again',
+    "Don't count on it",
+    'It is decidedly so',
+    'Ask again later',
+    'My reply is no',
+    'Without a doubt',
+    'Better not tell you now',
+    'My sources say no',
+    'Yes definitely',
+    'Cannot predict now',
+    'Outlook not so good',
+    'You may rely on it',
+    'Concentrate and ask again',
+    'Very doubtful',
+    'As I see it, yes',
+    'Most likely',
+    'Outlook good',
+    'Yes',
+    'Signs point to yes',
 ]
 
-def eightball():
-     return random.choice(EIGHTBALL_RESPONSES)
 
-def mc_status():
+def eightball() -> str:
+    return random.choice(EIGHTBALL_RESPONSES)
+
+
+def mc_status() -> str:
     server_ip = 'listened-refried.tun.ply.gg'
     try:
         server = JavaServer.lookup(server_ip, timeout=5)
@@ -120,23 +96,31 @@ def mc_status():
             f"{player_section}"
         )
 
-    except Exception:
+    except Exception as e:
+        logger.warning(f"mc_status failed: {e}")
         return (
             f"🔴 **{server_ip} is OFFLINE** (or unreachable).\n"
             "The server may be down or restarting. Try again later!"
         )
 
-def _load_release_state():
+
+def _load_release_state() -> dict:
     if os.path.exists(RELEASE_STATE_FILE):
         with open(RELEASE_STATE_FILE, 'r') as f:
             return json.load(f)
     return {}
 
-def _save_release_state(state):
-    with open(RELEASE_STATE_FILE, 'w') as f:
-        json.dump(state, f)
 
-def check_berserk_release():
+def _save_release_state(state: dict) -> None:
+    # Write to a temp file and rename over the target so a crash mid-write
+    # can't leave a truncated/corrupt state file behind.
+    tmp_path = RELEASE_STATE_FILE + '.tmp'
+    with open(tmp_path, 'w') as f:
+        json.dump(state, f)
+    os.replace(tmp_path, RELEASE_STATE_FILE)
+
+
+def check_berserk_release() -> str | None:
     """Checks MangaDex for the latest Berserk chapter.
 
     Returns an announcement string if a new chapter has appeared since the
@@ -155,7 +139,8 @@ def check_berserk_release():
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         data = response.json().get('data', [])
-    except Exception:
+    except Exception as e:
+        logger.warning(f"check_berserk_release failed: {e}")
         return None
 
     if not data:
@@ -184,7 +169,8 @@ def check_berserk_release():
         f"Read it here: https://mangadex.org/chapter/{chapter_id}"
     )
 
-def check_absolute_batman_release():
+
+def check_absolute_batman_release() -> str | None:
     """Checks Comic Vine for the latest Absolute Batman issue.
 
     Returns an announcement string if a new issue has appeared since the
@@ -210,7 +196,8 @@ def check_absolute_batman_release():
         response = requests.get(url, params=params, headers=headers, timeout=10)
         response.raise_for_status()
         results = response.json().get('results', [])
-    except Exception:
+    except Exception as e:
+        logger.warning(f"check_absolute_batman_release failed: {e}")
         return None
 
     if not results:

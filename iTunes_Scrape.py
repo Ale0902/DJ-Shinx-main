@@ -14,7 +14,7 @@ def updateSongList():
     rows = soup.find_all(class_="title-artist")
 
     filename = os.path.join(BASE, 'Top_Songs.csv')
-    with open(filename, 'w', newline ='') as csvfile:
+    with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
         f = csv.writer(csvfile)
         f.writerow(['Song', 'Artist', 'Rank'])
 

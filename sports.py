@@ -3,6 +3,7 @@ import datetime
 import time
 import logging
 import concurrent.futures
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,11 @@ SOCCER_PAGE_LIMIT = 1900  # leaves headroom under Discord's 2000-char cap
 
 EASTERN = ZoneInfo("America/New_York")
 
+# Shared thread pool for fan-out fetches (e.g. one soccer competition's
+# scoreboard per day of the week). Reused across calls instead of spinning
+# up a fresh pool per command invocation.
+_executor = concurrent.futures.ThreadPoolExecutor(max_workers=32)
+
 # Short-lived cache for ESPN's JSON responses. ESPN's scoreboard/standings
 # API is unofficial and undocumented, so this both avoids duplicate
 # round-trips within a single command (e.g. /ucl checking the phase and
@@ -57,10 +63,10 @@ EASTERN = ZoneInfo("America/New_York")
 # commands from different users, and gives a little cushion against getting
 # rate-limited. Live scores are only ever this many seconds stale.
 _CACHE_TTL_SECONDS = 15
-_response_cache = {}
+_response_cache: dict[tuple, tuple[float, Any]] = {}
 
 
-def _get_json(url, params=None):
+def _get_json(url: str, params: dict | None = None) -> Any:
     """GETs a JSON endpoint, serving a cached response if the same
     url+params were fetched within _CACHE_TTL_SECONDS."""
     key = (url, tuple(sorted((params or {}).items())))
@@ -76,11 +82,11 @@ def _get_json(url, params=None):
     return data
 
 
-def _soccer_scoreboard_url(slug):
+def _soccer_scoreboard_url(slug: str) -> str:
     return f"{ESPN_SITE_BASE}/soccer/{slug}/scoreboard"
 
 
-def _fetch_scoreboard(url, date=None, params=None):
+def _fetch_scoreboard(url: str, date: datetime.date | None = None, params: dict | None = None) -> dict:
     request_params = dict(params or {})
     # ESPN's `dates` filter only accepts a single YYYYMMDD day, not a range.
     if date:
@@ -88,12 +94,12 @@ def _fetch_scoreboard(url, date=None, params=None):
     return _get_json(url, params=request_params)
 
 
-def _fetch_standings(slug):
+def _fetch_standings(slug: str) -> dict:
     url = f"{ESPN_STANDINGS_BASE}/soccer/{slug}/standings"
     return _get_json(url)
 
 
-def _week_dates(start_weekday):
+def _week_dates(start_weekday: int) -> list[datetime.date]:
     """Returns the 7 dates of the week beginning on start_weekday
     (Monday=0 ... Sunday=6) that contains today, in Eastern time."""
     today = datetime.datetime.now(EASTERN).date()
@@ -102,11 +108,11 @@ def _week_dates(start_weekday):
     return [week_start + datetime.timedelta(days=i) for i in range(7)]
 
 
-def _format_time(dt):
+def _format_time(dt: datetime.datetime) -> str:
     return dt.strftime('%I:%M %p ET').lstrip('0')
 
 
-def _format_game_line(event, is_soccer=False, label_fn=None):
+def _format_game_line(event: dict, is_soccer: bool = False, label_fn: Callable[[dict], str] | None = None) -> str:
     sport_emoji = '⚽' if is_soccer else '🏈'
 
     competition = event['competitions'][0]
@@ -145,7 +151,7 @@ def _format_game_line(event, is_soccer=False, label_fn=None):
         return f"{sport_emoji} {day_label}: {matchup} — {_format_time(game_time)}"
 
 
-def nfl_synopsis():
+def nfl_synopsis() -> str:
     """Returns a synopsis of this week's NFL games with live/final scores."""
     try:
         # ESPN's default NFL scoreboard already spans the full Thu-Sun-Mon
@@ -166,7 +172,7 @@ def nfl_synopsis():
     return header + "\n" + "\n".join(lines)
 
 
-def nfl_live_matches():
+def nfl_live_matches() -> str:
     """Returns a synopsis of only the NFL games currently in progress,
     with their current score and time remaining -- unlike /nfl, this
     excludes finished and upcoming games entirely."""
@@ -184,7 +190,7 @@ def nfl_live_matches():
     return "## Live NFL Right Now!\n" + "\n".join(lines)
 
 
-def nfl_results_today():
+def nfl_results_today() -> str:
     """Returns the final score of every NFL game that finished today --
     unlike /nfl, this excludes in-progress and upcoming games entirely."""
     try:
@@ -202,27 +208,27 @@ def nfl_results_today():
     return "## Today's NFL Results!\n" + "\n".join(lines)
 
 
-def _nfl_stat(entry, name):
+def _nfl_stat(entry: dict, name: str) -> str | None:
     for stat in entry['stats']:
         if stat['name'] == name:
             return stat.get('displayValue')
     return None
 
 
-def _fetch_nfl_standings():
+def _fetch_nfl_standings() -> dict:
     # level=3 asks ESPN for conference -> division -> team, instead of the
     # default conference -> team grouping which loses division info.
     return _get_json(NFL_STANDINGS_URL, params={'level': 3})
 
 
-def _nfl_team_line(entry):
+def _nfl_team_line(entry: dict) -> str:
     team = entry['team'].get('shortDisplayName') or entry['team']['displayName']
     record = _nfl_stat(entry, 'overall') or '-'
     streak = _nfl_stat(entry, 'streak')
     return f"{team} — {record} ({streak})" if streak else f"{team} — {record}"
 
 
-def _nfl_division_page(standings_data):
+def _nfl_division_page(standings_data: dict) -> str:
     lines = ["## NFL Standings by Division"]
     for conference in standings_data.get('children', []):
         for division in conference.get('children', []):
@@ -233,7 +239,7 @@ def _nfl_division_page(standings_data):
     return "\n".join(lines)
 
 
-def _nfl_playoff_page(standings_data):
+def _nfl_playoff_page(standings_data: dict) -> str:
     lines = ["## NFL Playoff Picture"]
     for conference in standings_data.get('children', []):
         entries = [
@@ -259,7 +265,7 @@ def _nfl_playoff_page(standings_data):
     return "\n".join(lines)
 
 
-def nfl_standings_pages():
+def nfl_standings_pages() -> list[tuple[str, str]]:
     """Returns [(title, page_text)] for the /nflstandings paginator: one
     page grouping every team by division, and one page showing the current
     playoff picture -- division leaders, wild card spots, and the next few
@@ -276,12 +282,12 @@ def nfl_standings_pages():
     ]
 
 
-def _cfb_rank(competitor):
+def _cfb_rank(competitor: dict) -> int | None:
     rank = competitor.get('curatedRank', {}).get('current')
     return rank if rank and rank <= 25 else None
 
 
-def _cfb_label(competitor):
+def _cfb_label(competitor: dict) -> str:
     name = competitor['team']['displayName']
     rank = _cfb_rank(competitor)
     if rank:
@@ -291,15 +297,15 @@ def _cfb_label(competitor):
     return name
 
 
-def _cfb_involves_usf(event):
+def _cfb_involves_usf(event: dict) -> bool:
     return any(c['team']['id'] == USF_TEAM_ID for c in event['competitions'][0]['competitors'])
 
 
-def _cfb_involves_ranked_team(event):
+def _cfb_involves_ranked_team(event: dict) -> bool:
     return any(_cfb_rank(c) for c in event['competitions'][0]['competitors'])
 
 
-def cfb_synopsis():
+def cfb_synopsis() -> str:
     """Returns a compressed synopsis of this week's Division I FBS college
     football games. The full FBS slate runs 60-75+ games a week -- far too
     much for one Discord message -- so this focuses on South Florida's game
@@ -352,7 +358,7 @@ MLB_STANDINGS_URL = f"{ESPN_STANDINGS_BASE}/baseball/mlb/standings"
 MLB_CONTENTION_THRESHOLD = 5.0  # min ESPN playoff-odds % to count as "in contention"
 
 
-def _mlb_contending_team_ids(threshold=MLB_CONTENTION_THRESHOLD):
+def _mlb_contending_team_ids(threshold: float = MLB_CONTENTION_THRESHOLD) -> set[str]:
     """Returns the set of MLB team ids ESPN currently gives at least
     `threshold`% odds of making the playoffs. Every MLB series (30 teams,
     ~15 concurrent matchups) would be too much text, so this replaces a
@@ -375,7 +381,7 @@ def _mlb_contending_team_ids(threshold=MLB_CONTENTION_THRESHOLD):
     return contenders
 
 
-def _mlb_series_record(games):
+def _mlb_series_record(games: list[dict]) -> tuple[int, int, bool]:
     """Returns (home_wins, away_wins, all_completed) across a group of
     games between the same two teams."""
     home_wins = away_wins = 0
@@ -396,7 +402,7 @@ def _mlb_series_record(games):
     return home_wins, away_wins, completed_count == len(games)
 
 
-def _mlb_series_line(games):
+def _mlb_series_line(games: list[dict]) -> tuple[str, str]:
     games = sorted(games, key=lambda e: e['date'])
     competition = games[0]['competitions'][0]
     competitors = competition['competitors']
@@ -427,13 +433,13 @@ def _mlb_series_line(games):
     return games[0]['date'], f"⚾ {away_name} @ {home_name} ({date_range}, {len(games)}G){record}"
 
 
-def mlb_series_synopsis():
+def mlb_series_synopsis() -> str:
     """Returns this week's MLB matchups grouped into series (rather than
     every individual game, which would run 90+ games/week) with each
     series' overall record so far."""
     week_dates = _week_dates(start_weekday=0)
 
-    def fetch(day):
+    def fetch(day: datetime.date) -> list[dict]:
         try:
             return _fetch_scoreboard(MLB_SCOREBOARD_URL, date=day).get('events', [])
         except Exception as e:
@@ -441,20 +447,19 @@ def mlb_series_synopsis():
             return []
 
     events_by_id = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(week_dates)) as executor:
-        for events in executor.map(fetch, week_dates):
-            for event in events:
-                events_by_id[event['id']] = event
+    for events in _executor.map(fetch, week_dates):
+        for event in events:
+            events_by_id[event['id']] = event
 
     if not events_by_id:
         return "No MLB games scheduled this week."
 
     contenders = _mlb_contending_team_ids()
 
-    def is_featured(team_id):
+    def is_featured(team_id: str) -> bool:
         return team_id in FEATURED_MLB_TEAM_IDS or team_id in contenders
 
-    series_map = {}
+    series_map: dict[tuple[str, str], list[dict]] = {}
     for event in events_by_id.values():
         competitors = event['competitions'][0]['competitors']
         home_id = next(c for c in competitors if c['homeAway'] == 'home')['team']['id']
@@ -472,7 +477,7 @@ def mlb_series_synopsis():
     return header + "\n" + "\n".join(line for _, line in lines)
 
 
-def _truncate_page(body, limit=SOCCER_PAGE_LIMIT):
+def _truncate_page(body: str, limit: int = SOCCER_PAGE_LIMIT) -> str:
     """Trims a page's match list to fit Discord's message limit, noting how
     many matches were cut rather than letting a busy competition (e.g. World
     Cup Qualifiers across five confederations) overflow the message."""
@@ -494,7 +499,20 @@ def _truncate_page(body, limit=SOCCER_PAGE_LIMIT):
     return "\n".join(kept)
 
 
-def soccer_pages():
+def _fetch_soccer_jobs(jobs: list[tuple], fetch_fn: Callable[[tuple], tuple[str, list[dict]]]) -> dict[str, dict[str, dict]]:
+    """Runs fetch_fn(job) -> (competition_name, events) for each job in the
+    shared thread pool, merging every job's events into
+    {competition_name: {event_id: event}} -- de-duplicating repeats, since
+    e.g. soccer_pages() queries the same competition once per day of the
+    week and a match can show up in more than one day's response."""
+    grouped: dict[str, dict[str, dict]] = {name: {} for name, _ in SOCCER_COMPETITIONS}
+    for name, events in _executor.map(fetch_fn, jobs):
+        for event in events:
+            grouped[name][event['id']] = event
+    return grouped
+
+
+def soccer_pages() -> list[tuple[str, str]]:
     """Returns a list of (title, page_text) tuples, one per competition in
     SOCCER_COMPETITIONS, each showing that competition's matches for the
     current calendar week. Backs the /soccer command's button paginator so
@@ -511,7 +529,7 @@ def soccer_pages():
         for day in week_dates
     ]
 
-    def fetch(job):
+    def fetch(job: tuple) -> tuple[str, list[dict]]:
         name, slug, day = job
         try:
             events = _fetch_scoreboard(_soccer_scoreboard_url(slug), date=day).get('events', [])
@@ -520,11 +538,7 @@ def soccer_pages():
             events = []
         return name, events
 
-    events_by_competition = {name: {} for name, _ in SOCCER_COMPETITIONS}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(jobs))) as executor:
-        for name, events in executor.map(fetch, jobs):
-            for event in events:
-                events_by_competition[name][event['id']] = event
+    events_by_competition = _fetch_soccer_jobs(jobs, fetch)
 
     pages = []
     for name, _ in SOCCER_COMPETITIONS:
@@ -538,21 +552,21 @@ def soccer_pages():
     return pages
 
 
-def _is_live(event):
+def _is_live(event: dict) -> bool:
     status = event['competitions'][0].get('status', {})
     return status.get('type', {}).get('state') == 'in'
 
 
-def _is_final(event):
+def _is_final(event: dict) -> bool:
     status = event['competitions'][0].get('status', {})
     return status.get('type', {}).get('state') == 'post'
 
 
-def _event_date(event):
+def _event_date(event: dict) -> datetime.date:
     return datetime.datetime.fromisoformat(event['date'].replace('Z', '+00:00')).astimezone(EASTERN).date()
 
 
-def _match_event_lines(competition):
+def _match_event_lines(competition: dict) -> list[str]:
     """Returns "12' ⚽ Player Name (Team)" / "34' 🟥 Player Name (Team)"
     lines, in chronological order, for every goal and red card in a
     competition's play-by-play event log ('details')."""
@@ -585,7 +599,7 @@ def _match_event_lines(competition):
     return [line for _, line in events]
 
 
-def _format_live_soccer_line(event):
+def _format_live_soccer_line(event: dict) -> str:
     """A live match's score line plus, indented beneath it, each goal and
     red card so far with who was involved and the minute it happened."""
     lines = [_format_game_line(event, is_soccer=True)]
@@ -593,14 +607,14 @@ def _format_live_soccer_line(event):
     return "\n".join(lines)
 
 
-def live_soccer_matches():
+def live_soccer_matches() -> str:
     """Returns a single synopsis of only the soccer matches currently in
     progress, across every tracked competition -- unlike /soccer, this
     excludes finished and upcoming matches entirely."""
     today = datetime.datetime.now(EASTERN).date()
     jobs = [(name, slug) for name, slugs in SOCCER_COMPETITIONS for slug in slugs]
 
-    def fetch(job):
+    def fetch(job: tuple) -> tuple[str, list[dict]]:
         name, slug = job
         try:
             events = _fetch_scoreboard(_soccer_scoreboard_url(slug), date=today).get('events', [])
@@ -609,11 +623,7 @@ def live_soccer_matches():
             events = []
         return name, [e for e in events if _is_live(e)]
 
-    live_by_competition = {name: {} for name, _ in SOCCER_COMPETITIONS}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(jobs))) as executor:
-        for name, events in executor.map(fetch, jobs):
-            for event in events:
-                live_by_competition[name][event['id']] = event
+    live_by_competition = _fetch_soccer_jobs(jobs, fetch)
 
     sections = []
     for name, _ in SOCCER_COMPETITIONS:
@@ -629,14 +639,14 @@ def live_soccer_matches():
     return "## Live Soccer Right Now!\n\n" + "\n\n".join(sections)
 
 
-def soccer_results_today():
+def soccer_results_today() -> str:
     """Returns the final score of every soccer match that finished today,
     across every tracked competition -- unlike /soccer, this excludes
     in-progress and upcoming matches entirely."""
     today = datetime.datetime.now(EASTERN).date()
     jobs = [(name, slug) for name, slugs in SOCCER_COMPETITIONS for slug in slugs]
 
-    def fetch(job):
+    def fetch(job: tuple) -> tuple[str, list[dict]]:
         name, slug = job
         try:
             events = _fetch_scoreboard(_soccer_scoreboard_url(slug), date=today).get('events', [])
@@ -645,11 +655,7 @@ def soccer_results_today():
             events = []
         return name, [e for e in events if _is_final(e)]
 
-    results_by_competition = {name: {} for name, _ in SOCCER_COMPETITIONS}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(jobs))) as executor:
-        for name, events in executor.map(fetch, jobs):
-            for event in events:
-                results_by_competition[name][event['id']] = event
+    results_by_competition = _fetch_soccer_jobs(jobs, fetch)
 
     sections = []
     for name, _ in SOCCER_COMPETITIONS:
@@ -681,16 +687,16 @@ ANSI_BLUE = "\u001b[0;34m"
 ANSI_WHITE = "\u001b[0;37m"
 
 
-def _colorize(text, code):
+def _colorize(text: str, code: str | None) -> str:
     return text if code is None else f"{code}{text}{ANSI_RESET}"
 
 
-def _relegation_color(rank, total):
+def _relegation_color(rank: int, total: int) -> str | None:
     """Bottom 3 spots (the relegation zone) are colored red."""
     return ANSI_RED if rank > total - 3 else None
 
 
-def _ucl_zone_color(rank, total):
+def _ucl_zone_color(rank: int, total: int) -> str | None:
     """Top 8 (direct Round of 16 qualification) green, 9-24 (knockout
     round playoffs) blue, the rest (eliminated) white."""
     if rank <= 8:
@@ -700,11 +706,11 @@ def _ucl_zone_color(rank, total):
     return ANSI_WHITE
 
 
-def _stat_map(entry):
+def _stat_map(entry: dict) -> dict[str, str]:
     return {stat['name']: stat['displayValue'] for stat in entry['stats']}
 
 
-def _live_status_by_team(slug):
+def _live_status_by_team(slug: str) -> dict[str, str]:
     """Returns {team_id: 'win'|'loss'|'tie'} for teams currently in a live
     match in this competition, based on the match's current score."""
     try:
@@ -735,7 +741,7 @@ def _live_status_by_team(slug):
     return statuses
 
 
-def _standings_row(entry, indicator=''):
+def _standings_row(entry: dict, indicator: str = '') -> str:
     stats = _stat_map(entry)
     team = entry['team'].get('shortDisplayName') or entry['team']['displayName']
     return (
@@ -747,7 +753,13 @@ def _standings_row(entry, indicator=''):
     )
 
 
-def _format_standings_table(league_title, entries, color_fn=None, live_status=None, limit=1900):
+def _format_standings_table(
+    league_title: str,
+    entries: list[dict],
+    color_fn: Callable[[int, int], str | None] | None = None,
+    live_status: dict[str, str] | None = None,
+    limit: int = 1900,
+) -> list[str]:
     """Returns a list of Discord-ready message chunks for the standings
     table. A big table (e.g. UCL's 36-team league phase) can exceed
     Discord's 2000-char limit, so rows are split across multiple messages
@@ -784,7 +796,7 @@ def _format_standings_table(league_title, entries, color_fn=None, live_status=No
     return messages or [f"No {league_title} standings available right now."]
 
 
-def _league_standings(league_title, slug, color_fn=None):
+def _league_standings(league_title: str, slug: str, color_fn: Callable[[int, int], str | None] | None = None) -> list[str]:
     try:
         data = _fetch_standings(slug)
         entries = data['children'][0]['standings']['entries']
@@ -797,19 +809,19 @@ def _league_standings(league_title, slug, color_fn=None):
     return _format_standings_table(league_title, entries, color_fn=color_fn, live_status=live_status)
 
 
-def premier_league_table():
+def premier_league_table() -> list[str]:
     """Returns the current Premier League standings (relegation zone in
     red) as a list of Discord-ready message chunks."""
     return _league_standings("Premier League", "eng.1", color_fn=_relegation_color)
 
 
-def la_liga_table():
+def la_liga_table() -> list[str]:
     """Returns the current La Liga standings (relegation zone in red) as
     a list of Discord-ready message chunks."""
     return _league_standings("La Liga", "esp.1", color_fn=_relegation_color)
 
 
-def _ucl_current_phase():
+def _ucl_current_phase() -> str | None:
     """Returns the current UCL calendar phase label (e.g. 'League Phase',
     'Rd of 16', 'Final') by matching today's date against ESPN's own UCL
     calendar, or None if it can't be determined."""
@@ -833,7 +845,7 @@ def _ucl_current_phase():
     return None
 
 
-def _format_bracket_line(event):
+def _format_bracket_line(event: dict) -> str:
     line = _format_game_line(event, is_soccer=True)
 
     competition = event['competitions'][0]
@@ -850,7 +862,7 @@ def _format_bracket_line(event):
     return line
 
 
-def _ucl_bracket(phase_label):
+def _ucl_bracket(phase_label: str) -> list[str]:
     """Returns the current knockout-round matchups (with aggregate score,
     when ESPN provides one for a two-legged tie) once UCL has moved past
     the league phase. This lists the active round's fixtures rather than a
@@ -869,7 +881,7 @@ def _ucl_bracket(phase_label):
     return [f"## UEFA Champions League — {phase_label}\n" + "\n".join(lines)]
 
 
-def ucl_table():
+def ucl_table() -> list[str]:
     """Returns the UCL league-phase standings table, or the current
     knockout round's bracket matchups once the tournament moves past the
     league phase, as a list of Discord-ready message chunks."""

@@ -5,6 +5,7 @@ import time
 import logging
 import datetime
 import concurrent.futures
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -41,16 +42,20 @@ GRID_SESSION_FOR_RACE = {'Race': 'Qual', 'SR': 'SS'}
 QUALI_DAY_BANNERS = {'Qual': "QUALIFYING", 'SS': "SPRINT QUALIFYING"}
 RACE_DAY_BANNERS = {'Race': "RACE", 'SR': "SPRINT RACE"}
 
+# Shared thread pool for fan-out fetches (e.g. one request per driver for a
+# session's results). Reused across calls instead of spinning up a fresh
+# pool per invocation.
+_executor = concurrent.futures.ThreadPoolExecutor(max_workers=32)
 
 # Short-lived cache, mirroring sports.py's -- avoids duplicate round-trips
 # to ESPN's unofficial API within the same poll/command (e.g. the grid
 # recap and the race results both touching the same event during one
 # check_f1_updates() tick).
 _CACHE_TTL_SECONDS = 15
-_response_cache = {}
+_response_cache: dict[tuple, tuple[float, Any]] = {}
 
 
-def _fetch_json(url, params=None):
+def _fetch_json(url: str, params: dict | None = None) -> Any:
     key = (url, tuple(sorted((params or {}).items())))
     cached = _response_cache.get(key)
     now = time.monotonic()
@@ -64,19 +69,23 @@ def _fetch_json(url, params=None):
     return data
 
 
-def _load_state():
+def _load_state() -> dict:
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, 'r') as f:
             return json.load(f)
     return {}
 
 
-def _save_state(state):
-    with open(STATE_FILE, 'w') as f:
+def _save_state(state: dict) -> None:
+    # Write to a temp file and rename over the target so a crash mid-write
+    # (or an overlapping poll) can't leave a truncated/corrupt state file.
+    tmp_path = STATE_FILE + '.tmp'
+    with open(tmp_path, 'w') as f:
         json.dump(state, f)
+    os.replace(tmp_path, STATE_FILE)
 
 
-def _current_event():
+def _current_event() -> dict | None:
     """Returns the current/next F1 race weekend from ESPN's scoreboard, or
     None if there isn't one."""
     data = _fetch_json(F1_SITE_SCOREBOARD)
@@ -84,7 +93,7 @@ def _current_event():
     return events[0] if events else None
 
 
-def _event_location(event_id):
+def _event_location(event_id: str) -> str | None:
     """Returns 'Circuit Name — City, Country' for the event, or None if it
     can't be resolved."""
     try:
@@ -98,7 +107,7 @@ def _event_location(event_id):
         return None
 
 
-def _competitor_result(event_id, competition_id, competitor):
+def _competitor_result(event_id: str, competition_id: str, competitor: dict) -> tuple[str, str, str] | None:
     """Returns (place, driver_name, total_time) for one driver in a
     session, or None if it can't be fetched."""
     try:
@@ -112,7 +121,7 @@ def _competitor_result(event_id, competition_id, competitor):
         return None
 
 
-def _session_results_table(event_id, competition):
+def _session_results_table(event_id: str, competition: dict) -> str | None:
     """Returns a formatted, position-sorted results table for a session,
     or None if no results could be fetched (e.g. transient API hiccup --
     the caller should retry on a later poll rather than giving up)."""
@@ -120,16 +129,15 @@ def _session_results_table(event_id, competition):
     if not competitors:
         return None
 
-    def fetch(competitor):
+    def fetch(competitor: dict) -> tuple[str, str, str] | None:
         return _competitor_result(event_id, competition['id'], competitor)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(competitors)) as executor:
-        results = [r for r in executor.map(fetch, competitors) if r]
+    results = [r for r in _executor.map(fetch, competitors) if r]
 
     if not results:
         return None
 
-    def sort_key(result):
+    def sort_key(result: tuple[str, str, str]) -> int:
         try:
             return int(float(result[0]))
         except (TypeError, ValueError):
@@ -145,7 +153,7 @@ def _session_results_table(event_id, competition):
     return "```\n" + "\n".join(rows) + "\n```"
 
 
-def _grid_recap(event_id, competitions, race_abbrev):
+def _grid_recap(event_id: str, competitions: list[dict], race_abbrev: str) -> str | None:
     grid_abbrev = GRID_SESSION_FOR_RACE.get(race_abbrev)
     grid_session = next((c for c in competitions if c['type']['abbreviation'] == grid_abbrev), None)
     if not grid_session:
@@ -159,7 +167,7 @@ def _grid_recap(event_id, competitions, race_abbrev):
     return f"**{label} Recap:**\n{table}"
 
 
-def check_f1_updates():
+def check_f1_updates() -> list[str]:
     """Checks the current F1 race weekend for new milestones -- race week
     start, each session's results once it finishes, and qualifying/race
     day -- and returns a list of message strings to post. Persists state
@@ -228,7 +236,7 @@ def check_f1_updates():
     return messages
 
 
-def f1_status():
+def f1_status() -> str:
     """Returns whether it's currently F1 race week -- the calendar week
     (Monday-Sunday) containing the race -- and if so, which session(s)
     are happening today."""
@@ -267,11 +275,11 @@ def f1_status():
     )
 
 
-def _f1_standings_table(title, entries, name_fn):
-    def stat_map(entry):
+def _f1_standings_table(title: str, entries: list[dict], name_fn: Callable[[dict], str]) -> str:
+    def stat_map(entry: dict) -> dict:
         return {stat['name']: stat.get('displayValue') for stat in entry['stats']}
 
-    def sort_key(entry):
+    def sort_key(entry: dict) -> int:
         try:
             return int(float(stat_map(entry).get('rank') or 0))
         except (TypeError, ValueError):
@@ -291,7 +299,7 @@ def _f1_standings_table(title, entries, name_fn):
     return f"## {title}\n```\n{table}\n```"
 
 
-def f1_standings():
+def f1_standings() -> list[str]:
     """Returns the current F1 drivers' and constructors' championship
     standings as a list of Discord-ready message chunks."""
     try:
