@@ -121,8 +121,7 @@ def _format_game_line(event: dict, is_soccer: bool = False, label_fn: Callable[[
     away = next(c for c in competitors if c['homeAway'] == 'away')
 
     label_fn = label_fn or (lambda c: c['team']['displayName'])
-    home_name = f"**{label_fn(home)}**"
-    away_name = f"**{label_fn(away)}**"
+    home_name, away_name = label_fn(home), label_fn(away)
 
     game_time = datetime.datetime.fromisoformat(event['date'].replace('Z', '+00:00'))
     game_time = game_time.astimezone(EASTERN)
@@ -130,6 +129,18 @@ def _format_game_line(event: dict, is_soccer: bool = False, label_fn: Callable[[
 
     status = competition.get('status', {})
     state = status.get('type', {}).get('state', 'pre')
+
+    # Once there's a score to show, bold whichever team is ahead (or has
+    # won) instead of bolding both team names -- a tie bolds neither.
+    if state in ('in', 'post'):
+        try:
+            home_score, away_score = int(home['score']), int(away['score'])
+        except (KeyError, ValueError, TypeError):
+            home_score = away_score = 0
+        if home_score > away_score:
+            home_name = f"**{home_name}**"
+        elif away_score > home_score:
+            away_name = f"**{away_name}**"
 
     if is_soccer:
         matchup = f"{home_name} vs {away_name}"
@@ -406,8 +417,8 @@ def _mlb_series_line(games: list[dict]) -> tuple[str, str]:
     games = sorted(games, key=lambda e: e['date'])
     competition = games[0]['competitions'][0]
     competitors = competition['competitors']
-    home_name = f"**{next(c for c in competitors if c['homeAway'] == 'home')['team']['shortDisplayName']}**"
-    away_name = f"**{next(c for c in competitors if c['homeAway'] == 'away')['team']['shortDisplayName']}**"
+    home_name = next(c for c in competitors if c['homeAway'] == 'home')['team']['shortDisplayName']
+    away_name = next(c for c in competitors if c['homeAway'] == 'away')['team']['shortDisplayName']
 
     first_date = datetime.datetime.fromisoformat(games[0]['date'].replace('Z', '+00:00')).astimezone(EASTERN)
     last_date = datetime.datetime.fromisoformat(games[-1]['date'].replace('Z', '+00:00')).astimezone(EASTERN)
@@ -417,6 +428,13 @@ def _mlb_series_line(games: list[dict]) -> tuple[str, str]:
         date_range = f"{first_date.strftime('%a')}-{last_date.strftime('%a')}"
 
     home_wins, away_wins, all_completed = _mlb_series_record(games)
+
+    # Bold whichever team is ahead (or has won) the series instead of
+    # bolding both team names -- a tied series bolds neither.
+    if home_wins > away_wins:
+        home_name = f"**{home_name}**"
+    elif away_wins > home_wins:
+        away_name = f"**{away_name}**"
 
     record = ""
     if home_wins or away_wins:
