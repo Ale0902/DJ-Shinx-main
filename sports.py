@@ -181,6 +181,30 @@ def cfb_synopsis():
     return header + "\n\n" + "\n\n".join(sections)
 
 
+MARLINS_TEAM_ID = "28"
+
+# Teams with the biggest national followings/markets -- kept to a curated
+# set since every MLB series (30 teams, ~15 concurrent matchups) would be
+# too much text, similar to /cfb's Top 25 focus.
+BIG_MLB_TEAM_IDS = {
+    "10",  # New York Yankees
+    "19",  # Los Angeles Dodgers
+    "2",   # Boston Red Sox
+    "16",  # Chicago Cubs
+    "21",  # New York Mets
+    "26",  # San Francisco Giants
+    "24",  # St. Louis Cardinals
+    "15",  # Atlanta Braves
+    "18",  # Houston Astros
+    "22",  # Philadelphia Phillies
+    "3",   # Los Angeles Angels
+    "4",   # Chicago White Sox
+    "14",  # Toronto Blue Jays
+    "25",  # San Diego Padres
+    "13",  # Texas Rangers
+}
+
+
 def _mlb_series_record(games):
     """Returns (home_wins, away_wins, all_completed) across a group of
     games between the same two teams."""
@@ -202,12 +226,19 @@ def _mlb_series_record(games):
     return home_wins, away_wins, completed_count == len(games)
 
 
+def _mlb_team_label(team):
+    name = team['displayName']
+    return f"⭐ {name}" if team['id'] == MARLINS_TEAM_ID else name
+
+
 def _mlb_series_line(games):
     games = sorted(games, key=lambda e: e['date'])
     competition = games[0]['competitions'][0]
     competitors = competition['competitors']
-    home_name = next(c for c in competitors if c['homeAway'] == 'home')['team']['displayName']
-    away_name = next(c for c in competitors if c['homeAway'] == 'away')['team']['displayName']
+    home_team = next(c for c in competitors if c['homeAway'] == 'home')['team']
+    away_team = next(c for c in competitors if c['homeAway'] == 'away')['team']
+    home_name = _mlb_team_label(home_team)
+    away_name = _mlb_team_label(away_team)
 
     first_date = datetime.datetime.fromisoformat(games[0]['date'].replace('Z', '+00:00')).astimezone(EASTERN)
     last_date = datetime.datetime.fromisoformat(games[-1]['date'].replace('Z', '+00:00')).astimezone(EASTERN)
@@ -252,12 +283,20 @@ def mlb_series_synopsis():
     if not events_by_id:
         return "No MLB games scheduled this week."
 
+    def is_featured(team_id):
+        return team_id == MARLINS_TEAM_ID or team_id in BIG_MLB_TEAM_IDS
+
     series_map = {}
     for event in events_by_id.values():
         competitors = event['competitions'][0]['competitors']
         home_id = next(c for c in competitors if c['homeAway'] == 'home')['team']['id']
         away_id = next(c for c in competitors if c['homeAway'] == 'away')['team']['id']
+        if not (is_featured(home_id) or is_featured(away_id)):
+            continue
         series_map.setdefault((home_id, away_id), []).append(event)
+
+    if not series_map:
+        return "No notable MLB series found this week."
 
     lines = sorted((_mlb_series_line(games) for games in series_map.values()), key=lambda item: item[0])
 
