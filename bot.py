@@ -174,37 +174,37 @@ def run_discord_bot():
     @client.hybrid_command(name="nfl", description="This week's NFL games and live scores")
     async def nfl(ctx: commands.Context):
         await ctx.defer()
-        result = await asyncio.to_thread(sports.nfl_synopsis)
-        for chunk in llmask.chunk_response(result):
-            await ctx.send(chunk)
+        messages = await asyncio.to_thread(sports.nfl_synopsis)
+        for message in messages:
+            await ctx.send(message)
 
     @client.hybrid_command(name="nfllive", description="Only NFL games currently in progress")
     async def nfllive(ctx: commands.Context):
         await ctx.defer()
-        result = await asyncio.to_thread(sports.nfl_live_matches)
-        for chunk in llmask.chunk_response(result):
-            await ctx.send(chunk)
+        messages = await asyncio.to_thread(sports.nfl_live_matches)
+        for message in messages:
+            await ctx.send(message)
 
     @client.hybrid_command(name="nflresults", description="This week's finished NFL games and final scores")
     async def nflresults(ctx: commands.Context):
         await ctx.defer()
-        result = await asyncio.to_thread(sports.nfl_results_this_week)
-        for chunk in llmask.chunk_response(result):
-            await ctx.send(chunk)
+        messages = await asyncio.to_thread(sports.nfl_results_this_week)
+        for message in messages:
+            await ctx.send(message)
 
     @client.hybrid_command(name="cfb", description="This week's ranked college football games, with a South Florida spotlight")
     async def cfb(ctx: commands.Context):
         await ctx.defer()
-        result = await asyncio.to_thread(sports.cfb_synopsis)
-        for chunk in llmask.chunk_response(result):
-            await ctx.send(chunk)
+        messages = await asyncio.to_thread(sports.cfb_synopsis)
+        for message in messages:
+            await ctx.send(message)
 
     @client.hybrid_command(name="mlb", description="This week's MLB series and their records")
     async def mlb(ctx: commands.Context):
         await ctx.defer()
-        result = await asyncio.to_thread(sports.mlb_series_synopsis)
-        for chunk in llmask.chunk_response(result):
-            await ctx.send(chunk)
+        messages = await asyncio.to_thread(sports.mlb_series_synopsis)
+        for message in messages:
+            await ctx.send(message)
 
     @client.hybrid_command(name="soccer", description="This week's matches, one page per competition")
     async def soccer(ctx: commands.Context):
@@ -228,16 +228,16 @@ def run_discord_bot():
     @client.hybrid_command(name="livesoccer", description="Only soccer matches currently in progress")
     async def livesoccer(ctx: commands.Context):
         await ctx.defer()
-        result = await asyncio.to_thread(sports.live_soccer_matches)
-        for chunk in llmask.chunk_response(result):
-            await ctx.send(chunk)
+        messages = await asyncio.to_thread(sports.live_soccer_matches)
+        for message in messages:
+            await ctx.send(message)
 
     @client.hybrid_command(name="soccerresults", description="Today's finished soccer matches and final scores")
     async def soccerresults(ctx: commands.Context):
         await ctx.defer()
-        result = await asyncio.to_thread(sports.soccer_results_today)
-        for chunk in llmask.chunk_response(result):
-            await ctx.send(chunk)
+        messages = await asyncio.to_thread(sports.soccer_results_today)
+        for message in messages:
+            await ctx.send(message)
 
     @client.hybrid_command(name="prem", description="Current Premier League standings")
     async def prem(ctx: commands.Context):

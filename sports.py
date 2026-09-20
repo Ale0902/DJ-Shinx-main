@@ -130,24 +130,31 @@ def _format_game_line(event: dict, is_soccer: bool = False, label_fn: Callable[[
     status = competition.get('status', {})
     state = status.get('type', {}).get('state', 'pre')
 
-    # Once there's a score to show, bold whichever team is ahead (or has
-    # won) instead of bolding both team names -- a tie bolds neither.
+    # Once there's a score to show, color whichever team is ahead (or has
+    # won) green and the other red -- a tie colors neither. This relies on
+    # the line being wrapped in a ```ansi code block by the caller.
+    home_color = away_color = None
     if state in ('in', 'post'):
         try:
             home_score, away_score = int(home['score']), int(away['score'])
         except (KeyError, ValueError, TypeError):
             home_score = away_score = 0
         if home_score > away_score:
-            home_name = f"**{home_name}**"
+            home_color, away_color = ANSI_GREEN, ANSI_RED
         elif away_score > home_score:
-            away_name = f"**{away_name}**"
+            home_color, away_color = ANSI_RED, ANSI_GREEN
+
+    home_name = _colorize(home_name, home_color)
+    away_name = _colorize(away_name, away_color)
+    home_score_text = _colorize(home['score'], home_color)
+    away_score_text = _colorize(away['score'], away_color)
 
     if is_soccer:
         matchup = f"{home_name} vs {away_name}"
-        score = f"**{home['score']}-{away['score']}**"
+        score = f"{home_score_text}-{away_score_text}"
     else:
         matchup = f"{away_name} @ {home_name}"
-        score = f"**{away['score']}-{home['score']}**"
+        score = f"{away_score_text}-{home_score_text}"
 
     if state == 'in':
         clock = status.get('displayClock', '')
@@ -162,63 +169,66 @@ def _format_game_line(event: dict, is_soccer: bool = False, label_fn: Callable[[
         return f"{sport_emoji} {day_label}: {matchup} — {_format_time(game_time)}"
 
 
-def nfl_synopsis() -> str:
-    """Returns a synopsis of this week's NFL games with live/final scores."""
+def nfl_synopsis() -> list[str]:
+    """Returns this week's NFL games with live/final scores as a list of
+    Discord-ready message chunks."""
     try:
         # ESPN's default NFL scoreboard already spans the full Thu-Sun-Mon
         # week as one "current week", so no date filtering is needed here.
         data = _fetch_scoreboard(NFL_SCOREBOARD_URL)
     except Exception as e:
         logger.warning(f"nfl_synopsis failed: {e}")
-        return "Couldn't reach the NFL scores right now. Try again later!"
+        return ["Couldn't reach the NFL scores right now. Try again later!"]
 
     events = data.get('events', [])
     if not events:
-        return "No NFL games scheduled this week."
+        return ["No NFL games scheduled this week."]
 
     week_number = data.get('week', {}).get('number')
     header = f"## NFL Week {week_number} Games!" if week_number else "## This Week's NFL Games!"
 
     lines = [_format_game_line(event) for event in events]
-    return header + "\n" + "\n".join(lines)
+    return _chunk_ansi_block(header, lines)
 
 
-def nfl_live_matches() -> str:
+def nfl_live_matches() -> list[str]:
     """Returns a synopsis of only the NFL games currently in progress,
-    with their current score and time remaining -- unlike /nfl, this
-    excludes finished and upcoming games entirely."""
+    with their current score and time remaining, as a list of Discord-ready
+    message chunks -- unlike /nfl, this excludes finished and upcoming
+    games entirely."""
     try:
         data = _fetch_scoreboard(NFL_SCOREBOARD_URL)
     except Exception as e:
         logger.warning(f"nfl_live_matches failed: {e}")
-        return "Couldn't reach the NFL scores right now. Try again later!"
+        return ["Couldn't reach the NFL scores right now. Try again later!"]
 
     events = [event for event in data.get('events', []) if _is_live(event)]
     if not events:
-        return "No NFL games currently in progress."
+        return ["No NFL games currently in progress."]
 
     lines = [_format_game_line(event) for event in events]
-    return "## Live NFL Right Now!\n" + "\n".join(lines)
+    return _chunk_ansi_block("## Live NFL Right Now!", lines)
 
 
-def nfl_results_this_week() -> str:
+def nfl_results_this_week() -> list[str]:
     """Returns the final score of every NFL game that has finished so far
-    this week -- unlike /nfl, this excludes in-progress and upcoming games
-    entirely. ESPN's default scoreboard already spans the full Thu-Sun-Mon
-    week as one "current week", so this naturally includes Thursday and
-    Friday night results alongside the rest, not just games from today."""
+    this week, as a list of Discord-ready message chunks -- unlike /nfl,
+    this excludes in-progress and upcoming games entirely. ESPN's default
+    scoreboard already spans the full Thu-Sun-Mon week as one "current
+    week", so this naturally includes Thursday and Friday night results
+    alongside the rest, not just games from today."""
     try:
         data = _fetch_scoreboard(NFL_SCOREBOARD_URL)
     except Exception as e:
         logger.warning(f"nfl_results_this_week failed: {e}")
-        return "Couldn't reach the NFL scores right now. Try again later!"
+        return ["Couldn't reach the NFL scores right now. Try again later!"]
 
     events = [event for event in data.get('events', []) if _is_final(event)]
     if not events:
-        return "No NFL games have finished yet this week."
+        return ["No NFL games have finished yet this week."]
 
     lines = [_format_game_line(event) for event in events]
-    return "## This Week's NFL Results!\n" + "\n".join(lines)
+    return _chunk_ansi_block("## This Week's NFL Results!", lines)
 
 
 def _nfl_stat(entry: dict, name: str) -> str | None:
@@ -318,22 +328,23 @@ def _cfb_involves_ranked_team(event: dict) -> bool:
     return any(_cfb_rank(c) for c in event['competitions'][0]['competitors'])
 
 
-def cfb_synopsis() -> str:
+def cfb_synopsis() -> list[str]:
     """Returns a compressed synopsis of this week's Division I FBS college
-    football games. The full FBS slate runs 60-75+ games a week -- far too
-    much for one Discord message -- so this focuses on South Florida's game
-    (always shown) plus every game involving a ranked (Top 25) team."""
+    football games as a list of Discord-ready message chunks. The full FBS
+    slate runs 60-75+ games a week -- far too much for one Discord message
+    -- so this focuses on South Florida's game (always shown) plus every
+    game involving a ranked (Top 25) team."""
     try:
         # ESPN's default scoreboard only returns a small curated subset.
         # groups=80 selects FBS and a high limit pulls the full week's slate.
         data = _fetch_scoreboard(CFB_SCOREBOARD_URL, params={'groups': 80, 'limit': 400})
     except Exception as e:
         logger.warning(f"cfb_synopsis failed: {e}")
-        return "Couldn't reach the college football scores right now. Try again later!"
+        return ["Couldn't reach the college football scores right now. Try again later!"]
 
     events = data.get('events', [])
     if not events:
-        return "No college football games scheduled this week."
+        return ["No college football games scheduled this week."]
 
     week_number = data.get('week', {}).get('number')
     header = f"## College Football Week {week_number}!" if week_number else "## This Week's College Football Games!"
@@ -345,19 +356,20 @@ def cfb_synopsis() -> str:
         key=lambda e: e['date'],
     )
 
-    sections = []
+    if not usf_games and not ranked_games:
+        return [header + "\nNo ranked matchups or USF game found this week."]
+
+    messages = []
     if usf_games:
         lines = [_format_game_line(event, label_fn=_cfb_label) for event in usf_games]
-        sections.append("**South Florida Bulls**\n" + "\n".join(lines))
+        messages.extend(_chunk_ansi_block(f"{header}\n\n**South Florida Bulls**", lines))
 
     if ranked_games:
         lines = [_format_game_line(event, label_fn=_cfb_label) for event in ranked_games]
-        sections.append("**Top 25 Games**\n" + "\n".join(lines))
+        section_header = "**Top 25 Games**" if messages else f"{header}\n\n**Top 25 Games**"
+        messages.extend(_chunk_ansi_block(section_header, lines))
 
-    if not sections:
-        return header + "\nNo ranked matchups or USF game found this week."
-
-    return header + "\n\n" + "\n\n".join(sections)
+    return messages
 
 
 # Always shown regardless of opponent or playoff standing.
@@ -431,12 +443,12 @@ def _mlb_series_line(games: list[dict]) -> tuple[str, str]:
 
     home_wins, away_wins, all_completed = _mlb_series_record(games)
 
-    # Bold whichever team is ahead (or has won) the series instead of
-    # bolding both team names -- a tied series bolds neither.
+    # Color whichever team is ahead (or has won) the series green and the
+    # other red -- a tied series colors neither.
     if home_wins > away_wins:
-        home_name = f"**{home_name}**"
+        home_name, away_name = _colorize(home_name, ANSI_GREEN), _colorize(away_name, ANSI_RED)
     elif away_wins > home_wins:
-        away_name = f"**{away_name}**"
+        home_name, away_name = _colorize(home_name, ANSI_RED), _colorize(away_name, ANSI_GREEN)
 
     record = ""
     if home_wins or away_wins:
@@ -453,10 +465,11 @@ def _mlb_series_line(games: list[dict]) -> tuple[str, str]:
     return games[0]['date'], f"⚾ {away_name} @ {home_name} ({date_range}, {len(games)}G){record}"
 
 
-def mlb_series_synopsis() -> str:
+def mlb_series_synopsis() -> list[str]:
     """Returns this week's MLB matchups grouped into series (rather than
     every individual game, which would run 90+ games/week) with each
-    series' overall record so far."""
+    series' overall record so far, as a list of Discord-ready message
+    chunks."""
     week_dates = _week_dates(start_weekday=0)
 
     def fetch(day: datetime.date) -> list[dict]:
@@ -472,7 +485,7 @@ def mlb_series_synopsis() -> str:
             events_by_id[event['id']] = event
 
     if not events_by_id:
-        return "No MLB games scheduled this week."
+        return ["No MLB games scheduled this week."]
 
     contenders = _mlb_contending_team_ids()
 
@@ -489,34 +502,66 @@ def mlb_series_synopsis() -> str:
         series_map.setdefault((home_id, away_id), []).append(event)
 
     if not series_map:
-        return "No notable MLB series found this week."
+        return ["No notable MLB series found this week."]
 
     lines = sorted((_mlb_series_line(games) for games in series_map.values()), key=lambda item: item[0])
 
-    header = "## This Week's MLB Series!"
-    return header + "\n" + "\n".join(line for _, line in lines)
+    return _chunk_ansi_block("## This Week's MLB Series!", [line for _, line in lines])
 
 
-def _truncate_page(body: str, limit: int = SOCCER_PAGE_LIMIT) -> str:
-    """Trims a page's match list to fit Discord's message limit, noting how
-    many matches were cut rather than letting a busy competition (e.g. World
-    Cup Qualifiers across five confederations) overflow the message."""
-    if len(body) <= limit:
-        return body
+def _chunk_ansi_block(header: str, lines: list[str], limit: int = 1900) -> list[str]:
+    """Packs `lines` (each possibly containing its own embedded newlines,
+    e.g. a live match's goal list) into one or more Discord messages, each
+    wrapping its slice in its own fenced ```ansi block with its own header
+    -- so a busy day's slate can't have a color-coded line's fence split
+    across messages the way a naive character-count splitter would."""
+    if not lines:
+        return []
 
-    lines = body.split("\n")
+    fence_overhead = len(f"{header} (cont.)\n```ansi\n\n```")
+    messages = []
+    current: list[str] = []
+    current_len = 0
+
+    def flush():
+        if not current:
+            return
+        suffix = "" if not messages else " (cont.)"
+        messages.append(f"{header}{suffix}\n```ansi\n" + "\n".join(current) + "\n```")
+
+    for line in lines:
+        line_len = len(line) + 1
+        if current and current_len + line_len > limit - fence_overhead:
+            flush()
+            current = []
+            current_len = 0
+        current.append(line)
+        current_len += line_len
+
+    flush()
+    return messages
+
+
+def _ansi_page(header: str, lines: list[str], limit: int = SOCCER_PAGE_LIMIT) -> str:
+    """Wraps `lines` in a single fenced ```ansi block sized to fit within
+    `limit`, trimming from the end and noting how many were cut rather than
+    overflowing -- used where the caller needs exactly one page back (e.g.
+    one per competition in the /soccer paginator), unlike _chunk_ansi_block
+    which can spill into extra messages."""
+    overhead = len(f"{header}\n```ansi\n\n```")
     kept = []
     total = 0
     for line in lines:
         total += len(line) + 1
-        if total > limit:
+        if total > limit - overhead:
             break
         kept.append(line)
 
     remaining = len(lines) - len(kept)
     if remaining > 0:
         kept.append(f"...and {remaining} more match{'es' if remaining != 1 else ''}.")
-    return "\n".join(kept)
+
+    return f"{header}\n```ansi\n" + "\n".join(kept) + "\n```"
 
 
 def _fetch_soccer_jobs(jobs: list[tuple], fetch_fn: Callable[[tuple], tuple[str, list[dict]]]) -> dict[str, dict[str, dict]]:
@@ -566,8 +611,7 @@ def soccer_pages() -> list[tuple[str, str]]:
         if not events:
             continue
         lines = [_format_game_line(event, is_soccer=True) for event in events]
-        body = f"## {name}\n" + "\n".join(lines)
-        pages.append((name, _truncate_page(body)))
+        pages.append((name, _ansi_page(f"## {name}", lines)))
 
     return pages
 
@@ -623,10 +667,11 @@ def _format_live_soccer_line(event: dict) -> str:
     return "\n".join(lines)
 
 
-def live_soccer_matches() -> str:
-    """Returns a single synopsis of only the soccer matches currently in
-    progress, across every tracked competition -- unlike /soccer, this
-    excludes finished and upcoming matches entirely."""
+def live_soccer_matches() -> list[str]:
+    """Returns a list of Discord-ready message chunks covering only the
+    soccer matches currently in progress, across every tracked competition
+    -- unlike /soccer, this excludes finished and upcoming matches
+    entirely."""
     today = datetime.datetime.now(EASTERN).date()
     jobs = [(name, slug) for name, slugs in SOCCER_COMPETITIONS for slug in slugs]
 
@@ -641,24 +686,23 @@ def live_soccer_matches() -> str:
 
     live_by_competition = _fetch_soccer_jobs(jobs, fetch)
 
-    sections = []
+    messages = []
     for name, _ in SOCCER_COMPETITIONS:
         events = sorted(live_by_competition[name].values(), key=lambda e: e['date'])
         if not events:
             continue
         lines = [_format_live_soccer_line(event) for event in events]
-        sections.append(f"**{name}**\n" + "\n".join(lines))
+        header = "## Live Soccer Right Now!\n\n**{}**".format(name) if not messages else f"**{name}**"
+        messages.extend(_chunk_ansi_block(header, lines))
 
-    if not sections:
-        return "No soccer matches currently in progress."
-
-    return "## Live Soccer Right Now!\n\n" + "\n\n".join(sections)
+    return messages or ["No soccer matches currently in progress."]
 
 
-def soccer_results_today() -> str:
+def soccer_results_today() -> list[str]:
     """Returns the final score of every soccer match that finished today,
-    across every tracked competition -- unlike /soccer, this excludes
-    in-progress and upcoming matches entirely."""
+    across every tracked competition, as a list of Discord-ready message
+    chunks -- unlike /soccer, this excludes in-progress and upcoming
+    matches entirely."""
     today = datetime.datetime.now(EASTERN).date()
     jobs = [(name, slug) for name, slugs in SOCCER_COMPETITIONS for slug in slugs]
 
@@ -673,18 +717,16 @@ def soccer_results_today() -> str:
 
     results_by_competition = _fetch_soccer_jobs(jobs, fetch)
 
-    sections = []
+    messages = []
     for name, _ in SOCCER_COMPETITIONS:
         events = sorted(results_by_competition[name].values(), key=lambda e: e['date'])
         if not events:
             continue
         lines = [_format_game_line(event, is_soccer=True) for event in events]
-        sections.append(f"**{name}**\n" + "\n".join(lines))
+        header = "## Today's Soccer Results!\n\n**{}**".format(name) if not messages else f"**{name}**"
+        messages.extend(_chunk_ansi_block(header, lines))
 
-    if not sections:
-        return "No soccer results yet today."
-
-    return "## Today's Soccer Results!\n\n" + "\n\n".join(sections)
+    return messages or ["No soccer results yet today."]
 
 
 STANDINGS_HEADER = f"{'':2}{'#':>2} {'Team':<22} {'P':>2} {'W':>2} {'D':>2} {'L':>2} {'GF':>3} {'GA':>3} {'GD':>4} {'Pts':>3}"
@@ -894,7 +936,7 @@ def _ucl_bracket(phase_label: str) -> list[str]:
         return [f"## UEFA Champions League — {phase_label}\nNo matches scheduled yet for this round."]
 
     lines = [_format_bracket_line(event) for event in sorted(events, key=lambda e: e['date'])]
-    return [f"## UEFA Champions League — {phase_label}\n" + "\n".join(lines)]
+    return _chunk_ansi_block(f"## UEFA Champions League — {phase_label}", lines)
 
 
 def ucl_table() -> list[str]:
