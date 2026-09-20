@@ -206,8 +206,9 @@ def check_f1_updates():
 
 
 def f1_status():
-    """Returns whether it's currently an F1 race weekend, and if so, which
-    session(s) are happening today."""
+    """Returns whether it's currently F1 race week -- the calendar week
+    (Monday-Sunday) containing the race -- and if so, which session(s)
+    are happening today."""
     try:
         event = _current_event()
     except Exception:
@@ -216,11 +217,12 @@ def f1_status():
     if not event:
         return "No upcoming F1 event found."
 
-    weekend_start = datetime.datetime.fromisoformat(event['date'].replace('Z', '+00:00')).astimezone(EASTERN).date()
-    weekend_end = datetime.datetime.fromisoformat(event['endDate'].replace('Z', '+00:00')).astimezone(EASTERN).date()
+    first_session = datetime.datetime.fromisoformat(event['date'].replace('Z', '+00:00')).astimezone(EASTERN).date()
+    race_week_start = first_session - datetime.timedelta(days=first_session.weekday())
+    race_week_end = race_week_start + datetime.timedelta(days=6)
     today = datetime.datetime.now(EASTERN).date()
 
-    if weekend_start <= today <= weekend_end:
+    if race_week_start <= today <= race_week_end:
         competitions = sorted(event.get('competitions', []), key=lambda c: c['date'])
         todays = [
             c for c in competitions
@@ -231,13 +233,13 @@ def f1_status():
             today_text = f"\nToday: {labels}"
         else:
             today_text = ""
-        return f"🏎️🏁 Yes, it's race weekend!\n**{event['name']}**{today_text}"
+        return f"🏎️🏁 Yes, it's race week!\n**{event['name']}**{today_text}"
 
-    days_until = (weekend_start - today).days
+    days_until = (race_week_start - today).days
     day_word = "day" if days_until == 1 else "days"
     return (
-        f"🚦 No, it's not race weekend.\n"
-        f"Next up: **{event['name']}** in {days_until} {day_word} ({weekend_start.strftime('%B %d')})."
+        f"🚦 No, it's not race week.\n"
+        f"Next up: **{event['name']}** in {days_until} {day_word} (week of {race_week_start.strftime('%B %d')})."
     )
 
 
