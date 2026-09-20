@@ -185,10 +185,10 @@ def run_discord_bot():
         for chunk in llmask.chunk_response(result):
             await ctx.send(chunk)
 
-    @client.hybrid_command(name="nflresults", description="Today's finished NFL games and final scores")
+    @client.hybrid_command(name="nflresults", description="This week's finished NFL games and final scores")
     async def nflresults(ctx: commands.Context):
         await ctx.defer()
-        result = await asyncio.to_thread(sports.nfl_results_today)
+        result = await asyncio.to_thread(sports.nfl_results_this_week)
         for chunk in llmask.chunk_response(result):
             await ctx.send(chunk)
 

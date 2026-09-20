@@ -201,22 +201,24 @@ def nfl_live_matches() -> str:
     return "## Live NFL Right Now!\n" + "\n".join(lines)
 
 
-def nfl_results_today() -> str:
-    """Returns the final score of every NFL game that finished today --
-    unlike /nfl, this excludes in-progress and upcoming games entirely."""
+def nfl_results_this_week() -> str:
+    """Returns the final score of every NFL game that has finished so far
+    this week -- unlike /nfl, this excludes in-progress and upcoming games
+    entirely. ESPN's default scoreboard already spans the full Thu-Sun-Mon
+    week as one "current week", so this naturally includes Thursday and
+    Friday night results alongside the rest, not just games from today."""
     try:
         data = _fetch_scoreboard(NFL_SCOREBOARD_URL)
     except Exception as e:
-        logger.warning(f"nfl_results_today failed: {e}")
+        logger.warning(f"nfl_results_this_week failed: {e}")
         return "Couldn't reach the NFL scores right now. Try again later!"
 
-    today = datetime.datetime.now(EASTERN).date()
-    events = [event for event in data.get('events', []) if _is_final(event) and _event_date(event) == today]
+    events = [event for event in data.get('events', []) if _is_final(event)]
     if not events:
-        return "No NFL games have finished today."
+        return "No NFL games have finished yet this week."
 
     lines = [_format_game_line(event) for event in events]
-    return "## Today's NFL Results!\n" + "\n".join(lines)
+    return "## This Week's NFL Results!\n" + "\n".join(lines)
 
 
 def _nfl_stat(entry: dict, name: str) -> str | None:
@@ -578,10 +580,6 @@ def _is_live(event: dict) -> bool:
 def _is_final(event: dict) -> bool:
     status = event['competitions'][0].get('status', {})
     return status.get('type', {}).get('state') == 'post'
-
-
-def _event_date(event: dict) -> datetime.date:
-    return datetime.datetime.fromisoformat(event['date'].replace('Z', '+00:00')).astimezone(EASTERN).date()
 
 
 def _match_event_lines(competition: dict) -> list[str]:
