@@ -395,37 +395,44 @@ def _is_live(event):
     return status.get('type', {}).get('state') == 'in'
 
 
-def _goal_lines(competition):
-    """Returns "12' ⚽ Player Name (Team)" lines, in chronological order, for
-    every goal in a competition's play-by-play event log ('details')."""
+def _match_event_lines(competition):
+    """Returns "12' ⚽ Player Name (Team)" / "34' 🟥 Player Name (Team)"
+    lines, in chronological order, for every goal and red card in a
+    competition's play-by-play event log ('details')."""
     team_names = {
         c['team']['id']: c['team'].get('shortDisplayName') or c['team']['displayName']
         for c in competition.get('competitors', [])
     }
 
-    goals = []
+    events = []
     for detail in competition.get('details', []):
-        if not detail.get('scoringPlay'):
+        is_goal = detail.get('scoringPlay')
+        is_red_card = detail.get('redCard')
+        if not (is_goal or is_red_card):
             continue
+
         clock = detail.get('clock', {})
         scorers = detail.get('athletesInvolved') or []
         name = scorers[0]['displayName'] if scorers else 'Unknown'
-        tag = ' (OG)' if detail.get('ownGoal') else ' (pen)' if detail.get('penaltyKick') else ''
         team_name = team_names.get(detail.get('team', {}).get('id'), '')
-        goals.append((
-            clock.get('value', 0),
-            f"     {clock.get('displayValue', '')} ⚽ {name}{tag} ({team_name})",
-        ))
 
-    goals.sort(key=lambda g: g[0])
-    return [line for _, line in goals]
+        if is_goal:
+            tag = ' (OG)' if detail.get('ownGoal') else ' (pen)' if detail.get('penaltyKick') else ''
+            text = f"⚽ {name}{tag} ({team_name})"
+        else:
+            text = f"🟥 {name} ({team_name})"
+
+        events.append((clock.get('value', 0), f"     {clock.get('displayValue', '')} {text}"))
+
+    events.sort(key=lambda e: e[0])
+    return [line for _, line in events]
 
 
 def _format_live_soccer_line(event):
-    """A live match's score line plus, indented beneath it, each goal
-    scored so far with the scorer and the minute it went in."""
+    """A live match's score line plus, indented beneath it, each goal and
+    red card so far with who was involved and the minute it happened."""
     lines = [_format_game_line(event, is_soccer=True)]
-    lines.extend(_goal_lines(event['competitions'][0]))
+    lines.extend(_match_event_lines(event['competitions'][0]))
     return "\n".join(lines)
 
 
