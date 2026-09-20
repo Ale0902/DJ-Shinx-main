@@ -133,6 +133,23 @@ def nfl_synopsis():
     return header + "\n" + "\n".join(lines)
 
 
+def nfl_live_matches():
+    """Returns a synopsis of only the NFL games currently in progress,
+    with their current score and time remaining -- unlike /nfl, this
+    excludes finished and upcoming games entirely."""
+    try:
+        data = _fetch_scoreboard(NFL_SCOREBOARD_URL)
+    except Exception:
+        return "Couldn't reach the NFL scores right now. Try again later!"
+
+    events = [event for event in data.get('events', []) if _is_live(event)]
+    if not events:
+        return "No NFL games currently in progress."
+
+    lines = [_format_game_line(event) for event in events]
+    return "## Live NFL Right Now!\n" + "\n".join(lines)
+
+
 def _cfb_rank(competitor):
     rank = competitor.get('curatedRank', {}).get('current')
     return rank if rank and rank <= 25 else None

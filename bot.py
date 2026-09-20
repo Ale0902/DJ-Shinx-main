@@ -18,6 +18,7 @@ EASTERN = ZoneInfo("America/New_York")
 # up instead of silently vanishing from the list.
 COMMAND_CATEGORIES = {
     'nfl': 'Sports',
+    'nfllive': 'Sports',
     'cfb': 'Sports',
     'mlb': 'Sports',
     'soccer': 'Sports',
@@ -150,6 +151,13 @@ def run_discord_bot():
     async def nfl(ctx: commands.Context):
         await ctx.defer()
         result = await asyncio.to_thread(sports.nfl_synopsis)
+        for chunk in llmask.chunk_response(result):
+            await ctx.send(chunk)
+
+    @client.hybrid_command(name="nfllive", description="Only NFL games currently in progress")
+    async def nfllive(ctx: commands.Context):
+        await ctx.defer()
+        result = await asyncio.to_thread(sports.nfl_live_matches)
         for chunk in llmask.chunk_response(result):
             await ctx.send(chunk)
 
