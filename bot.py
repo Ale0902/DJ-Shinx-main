@@ -236,13 +236,11 @@ def run_discord_bot():
     @client.hybrid_command(name="help", description="Lists every command DJ Shinx offers")
     async def help_command(ctx: commands.Context):
         by_category = {category: [] for category in CATEGORY_ORDER}
-        other = []
         for command in client.commands:
-            by_category.get(COMMAND_CATEGORIES.get(command.name), other).append(command)
+            by_category.setdefault(COMMAND_CATEGORIES.get(command.name, 'Other'), []).append(command)
 
         lines = ["## DJ Shinx Commands", "*(use with / or !)*"]
-        for category in [*CATEGORY_ORDER, 'Other']:
-            group = other if category == 'Other' else by_category[category]
+        for category, group in by_category.items():
             if not group:
                 continue
             lines.append(f"\n**{category}**")
