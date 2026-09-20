@@ -77,7 +77,7 @@ class SoccerPaginator(discord.ui.View):
 def run_discord_bot():
     intents = discord.Intents.default()
     intents.message_content = True
-    client = commands.Bot(command_prefix=['!', '/'], intents=intents)
+    client = commands.Bot(command_prefix=['!', '/'], intents=intents, help_command=None)
 
  #=========================--COMMANDS (slash + ! text)--=====================#
  # hybrid_command registers each one as both a /slash command and a
@@ -204,6 +204,14 @@ def run_discord_bot():
         await ctx.send(f"**Question:** {question}")
         result = await asyncio.to_thread(llmask.ask, question)
         for chunk in llmask.chunk_response(result):
+            await ctx.send(chunk)
+
+    @client.hybrid_command(name="help", description="Lists every command DJ Shinx offers")
+    async def help_command(ctx: commands.Context):
+        lines = ["## DJ Shinx Commands", "*(use with / or !)*", ""]
+        for command in sorted(client.commands, key=lambda c: c.name):
+            lines.append(f"**{command.name}** — {command.description or 'No description.'}")
+        for chunk in llmask.chunk_response("\n".join(lines)):
             await ctx.send(chunk)
 
  #=========================--END COMMANDS--===================================#
