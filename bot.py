@@ -295,16 +295,18 @@ def run_discord_bot():
                 continue
             by_category.setdefault(COMMAND_CATEGORIES.get(command.name, 'Other'), []).append(command)
 
-        lines = ["## DJ Shinx Commands", "*(use with / or !)*"]
+        pages = []
         for category, group in by_category.items():
             if not group:
                 continue
-            lines.append(f"\n**{category}**")
+            lines = [f"## {category} Commands", "*(use with / or !)*"]
             for command in sorted(group, key=lambda c: c.name):
                 lines.append(f"`{command.name}` — {command.description or 'No description.'}")
+            pages.append((category, "\n".join(lines)))
 
-        for chunk in llmask.chunk_response("\n".join(lines)):
-            await ctx.send(chunk)
+        view = PaginatorView(pages, author_id=ctx.author.id, command_name="help")
+        message = await ctx.send(view.content(), view=view)
+        view.message = message
 
  #=========================--END COMMANDS--===================================#
 
