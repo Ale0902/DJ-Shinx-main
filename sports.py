@@ -181,7 +181,12 @@ def cfb_synopsis():
     return header + "\n\n" + "\n\n".join(sections)
 
 
-MARLINS_TEAM_ID = "28"
+# Always shown regardless of opponent, and starred in the output.
+FEATURED_MLB_TEAM_IDS = {
+    "28",  # Miami Marlins
+    "21",  # New York Mets
+    "30",  # Tampa Bay Rays
+}
 
 # Teams with the biggest national followings/markets -- kept to a curated
 # set since every MLB series (30 teams, ~15 concurrent matchups) would be
@@ -228,7 +233,7 @@ def _mlb_series_record(games):
 
 def _mlb_team_label(team):
     name = team['displayName']
-    return f"⭐ {name}" if team['id'] == MARLINS_TEAM_ID else name
+    return f"⭐ {name}" if team['id'] in FEATURED_MLB_TEAM_IDS else name
 
 
 def _mlb_series_line(games):
@@ -284,7 +289,7 @@ def mlb_series_synopsis():
         return "No MLB games scheduled this week."
 
     def is_featured(team_id):
-        return team_id == MARLINS_TEAM_ID or team_id in BIG_MLB_TEAM_IDS
+        return team_id in FEATURED_MLB_TEAM_IDS or team_id in BIG_MLB_TEAM_IDS
 
     series_map = {}
     for event in events_by_id.values():
