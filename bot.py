@@ -151,8 +151,8 @@ def run_discord_bot():
         message = await ctx.send(view.content(), view=view)
         view.message = message
 
-    @client.hybrid_command(name="currentsoccer", description="Only soccer matches currently in progress")
-    async def currentsoccer(ctx: commands.Context):
+    @client.hybrid_command(name="livesoccer", description="Only soccer matches currently in progress")
+    async def livesoccer(ctx: commands.Context):
         await ctx.defer()
         result = await asyncio.to_thread(sports.live_soccer_matches)
         for chunk in llmask.chunk_response(result):
