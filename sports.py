@@ -464,8 +464,12 @@ def live_soccer_matches():
     return "## Live Soccer Right Now!\n\n" + "\n\n".join(sections)
 
 
-STANDINGS_HEADER = f"{'#':>2} {'Team':<22} {'P':>2} {'W':>2} {'D':>2} {'L':>2} {'GF':>3} {'GA':>3} {'GD':>4} {'Pts':>3}"
+STANDINGS_HEADER = f"{'':2}{'#':>2} {'Team':<22} {'P':>2} {'W':>2} {'D':>2} {'L':>2} {'GF':>3} {'GA':>3} {'GD':>4} {'Pts':>3}"
 STANDINGS_SEPARATOR = '-' * len(STANDINGS_HEADER)
+
+# Marks a team's row in a standings table while they're in a live match:
+# green if currently winning, red if losing, white/grey if tied.
+LIVE_STATUS_EMOJI = {'win': '🟢', 'loss': '🔴', 'tie': '⚪'}
 
 # Discord renders a subset of ANSI codes inside a ```ansi block (desktop/web
 # only -- mobile just shows the plain, uncolored text).
@@ -499,11 +503,41 @@ def _stat_map(entry):
     return {stat['name']: stat['displayValue'] for stat in entry['stats']}
 
 
-def _standings_row(entry):
+def _live_status_by_team(slug):
+    """Returns {team_id: 'win'|'loss'|'tie'} for teams currently in a live
+    match in this competition, based on the match's current score."""
+    try:
+        today = datetime.datetime.now(EASTERN).date()
+        data = _fetch_scoreboard(_soccer_scoreboard_url(slug), date=today)
+    except Exception:
+        return {}
+
+    statuses = {}
+    for event in data.get('events', []):
+        if not _is_live(event):
+            continue
+        competitors = event['competitions'][0]['competitors']
+        home = next(c for c in competitors if c['homeAway'] == 'home')
+        away = next(c for c in competitors if c['homeAway'] == 'away')
+        home_score, away_score = int(home['score']), int(away['score'])
+        if home_score > away_score:
+            statuses[home['team']['id']] = 'win'
+            statuses[away['team']['id']] = 'loss'
+        elif away_score > home_score:
+            statuses[away['team']['id']] = 'win'
+            statuses[home['team']['id']] = 'loss'
+        else:
+            statuses[home['team']['id']] = 'tie'
+            statuses[away['team']['id']] = 'tie'
+
+    return statuses
+
+
+def _standings_row(entry, indicator=''):
     stats = _stat_map(entry)
     team = entry['team'].get('shortDisplayName') or entry['team']['displayName']
     return (
-        f"{stats.get('rank', '-'):>2} {team:<22.22} "
+        f"{indicator:<2}{stats.get('rank', '-'):>2} {team:<22.22} "
         f"{stats.get('gamesPlayed', '-'):>2} {stats.get('wins', '-'):>2} "
         f"{stats.get('ties', '-'):>2} {stats.get('losses', '-'):>2} "
         f"{stats.get('pointsFor', '-'):>3} {stats.get('pointsAgainst', '-'):>3} "
@@ -511,7 +545,7 @@ def _standings_row(entry):
     )
 
 
-def _format_standings_table(league_title, entries, color_fn=None, limit=1900):
+def _format_standings_table(league_title, entries, color_fn=None, live_status=None, limit=1900):
     """Returns a list of Discord-ready message chunks for the standings
     table. A big table (e.g. UCL's 36-team league phase) can exceed
     Discord's 2000-char limit, so rows are split across multiple messages
@@ -519,11 +553,15 @@ def _format_standings_table(league_title, entries, color_fn=None, limit=1900):
     letting a naive character-count split cut a fenced block in half.
 
     color_fn(rank, total) -> an ANSI color code (or None) lets callers
-    highlight zones like relegation spots or UCL qualification cutoffs."""
+    highlight zones like relegation spots or UCL qualification cutoffs.
+    live_status is the {team_id: 'win'|'loss'|'tie'} map from
+    _live_status_by_team, marking teams currently mid-match."""
+    live_status = live_status or {}
     total = len(entries)
     data_rows = []
     for entry in entries:
-        row = _standings_row(entry)
+        indicator = LIVE_STATUS_EMOJI.get(live_status.get(entry['team']['id']), '')
+        row = _standings_row(entry, indicator=indicator)
         if color_fn:
             rank = int(_stat_map(entry).get('rank') or 0)
             row = _colorize(row, color_fn(rank, total))
@@ -552,7 +590,8 @@ def _league_standings(league_title, slug, color_fn=None):
         return [f"Couldn't reach {league_title} standings right now. Try again later!"]
 
     entries = sorted(entries, key=lambda e: int(_stat_map(e).get('rank') or 0))
-    return _format_standings_table(league_title, entries, color_fn=color_fn)
+    live_status = _live_status_by_team(slug)
+    return _format_standings_table(league_title, entries, color_fn=color_fn, live_status=live_status)
 
 
 def premier_league_table():
