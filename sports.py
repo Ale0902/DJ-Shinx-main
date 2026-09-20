@@ -241,15 +241,15 @@ def _mlb_series_line(games):
     games = sorted(games, key=lambda e: e['date'])
     competition = games[0]['competitions'][0]
     competitors = competition['competitors']
-    home_name = next(c for c in competitors if c['homeAway'] == 'home')['team']['displayName']
-    away_name = next(c for c in competitors if c['homeAway'] == 'away')['team']['displayName']
+    home_name = next(c for c in competitors if c['homeAway'] == 'home')['team']['shortDisplayName']
+    away_name = next(c for c in competitors if c['homeAway'] == 'away')['team']['shortDisplayName']
 
     first_date = datetime.datetime.fromisoformat(games[0]['date'].replace('Z', '+00:00')).astimezone(EASTERN)
     last_date = datetime.datetime.fromisoformat(games[-1]['date'].replace('Z', '+00:00')).astimezone(EASTERN)
     if first_date.date() == last_date.date():
-        date_range = first_date.strftime('%A (%m/%d)')
+        date_range = first_date.strftime('%a')
     else:
-        date_range = f"{first_date.strftime('%a %m/%d')}-{last_date.strftime('%a %m/%d')}"
+        date_range = f"{first_date.strftime('%a')}-{last_date.strftime('%a')}"
 
     home_wins, away_wins, all_completed = _mlb_series_record(games)
 
@@ -265,8 +265,7 @@ def _mlb_series_line(games):
             verb = "won" if all_completed else "leads"
             record = f" — {leader} {verb} {leader_wins}-{other_wins}"
 
-    game_word = "game" if len(games) == 1 else "games"
-    return games[0]['date'], f"⚾ {away_name} @ {home_name} ({date_range}, {len(games)} {game_word}){record}"
+    return games[0]['date'], f"⚾ {away_name} @ {home_name} ({date_range}, {len(games)}G){record}"
 
 
 def mlb_series_synopsis():
