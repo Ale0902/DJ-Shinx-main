@@ -142,6 +142,9 @@ def run_discord_bot():
     async def soccer(ctx: discord.Interaction):
         await ctx.response.defer()
         pages = await asyncio.to_thread(sports.soccer_pages)
+        if not pages:
+            await ctx.followup.send("No matches scheduled in any tracked competition this week.")
+            return
         view = SoccerPaginator(pages, author_id=ctx.user.id)
         message = await ctx.followup.send(view.content(), view=view)
         view.message = message

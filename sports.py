@@ -381,11 +381,10 @@ def soccer_pages():
     pages = []
     for name, _ in SOCCER_COMPETITIONS:
         events = sorted(events_by_competition[name].values(), key=lambda e: e['date'])
-        if events:
-            lines = [_format_game_line(event, is_soccer=True) for event in events]
-            body = f"## {name}\n" + "\n".join(lines)
-        else:
-            body = f"## {name}\nNo matches scheduled this week."
+        if not events:
+            continue
+        lines = [_format_game_line(event, is_soccer=True) for event in events]
+        body = f"## {name}\n" + "\n".join(lines)
         pages.append((name, _truncate_page(body)))
 
     return pages
