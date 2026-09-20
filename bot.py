@@ -35,7 +35,7 @@ COMMAND_CATEGORIES = {
     'ping': 'Fun',
     'coin_flip': 'Fun',
     '8ball': 'Fun',
-    'status': 'Fun',
+    'mcstatus': 'Fun',
     'ask': 'AI',
 }
 CATEGORY_ORDER = ['Sports', 'Music', 'Fun', 'AI']
@@ -219,8 +219,8 @@ def run_discord_bot():
         for message in messages:
             await ctx.send(message)
 
-    @client.hybrid_command(name="status", description="Check the Minecraft server status")
-    async def status(ctx: commands.Context):
+    @client.hybrid_command(name="mcstatus", description="Check the Minecraft server status")
+    async def mcstatus(ctx: commands.Context):
         await ctx.defer()
         result = await asyncio.to_thread(bf.mc_status)
         await ctx.send(result)
