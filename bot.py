@@ -41,6 +41,7 @@ COMMAND_CATEGORIES = {
     'recsong': 'Music',
     'top5songs': 'Music',
     'hello': 'Fun',
+    'vini': 'Fun',
     'rolld6': 'Fun',
     'rolld20': 'Fun',
     'ping': 'Fun',
@@ -155,6 +156,10 @@ def run_discord_bot():
     @client.hybrid_command(name="coin_flip", description="Flip a coin!")
     async def coinflip(ctx: commands.Context):
         await ctx.send(responses.coinflip())
+
+    @client.hybrid_command(name="vini", description="Posts a Vini Jr tweet")
+    async def vini(ctx: commands.Context):
+        await ctx.send("https://x.com/vinijr/status/1851023004496789695?s=20")
 
     @client.hybrid_command(name="8ball", description="Shakes an eight ball")
     async def eightball(ctx: commands.Context):
