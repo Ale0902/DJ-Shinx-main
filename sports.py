@@ -181,33 +181,39 @@ def cfb_synopsis():
     return header + "\n\n" + "\n\n".join(sections)
 
 
-# Always shown regardless of opponent, and starred in the output.
+# Always shown regardless of opponent or playoff standing.
 FEATURED_MLB_TEAM_IDS = {
     "28",  # Miami Marlins
     "21",  # New York Mets
     "30",  # Tampa Bay Rays
 }
 
-# Teams with the biggest national followings/markets -- kept to a curated
-# set since every MLB series (30 teams, ~15 concurrent matchups) would be
-# too much text, similar to /cfb's Top 25 focus.
-BIG_MLB_TEAM_IDS = {
-    "10",  # New York Yankees
-    "19",  # Los Angeles Dodgers
-    "2",   # Boston Red Sox
-    "16",  # Chicago Cubs
-    "21",  # New York Mets
-    "26",  # San Francisco Giants
-    "24",  # St. Louis Cardinals
-    "15",  # Atlanta Braves
-    "18",  # Houston Astros
-    "22",  # Philadelphia Phillies
-    "3",   # Los Angeles Angels
-    "4",   # Chicago White Sox
-    "14",  # Toronto Blue Jays
-    "25",  # San Diego Padres
-    "13",  # Texas Rangers
-}
+MLB_STANDINGS_URL = f"{ESPN_STANDINGS_BASE}/baseball/mlb/standings"
+MLB_CONTENTION_THRESHOLD = 5.0  # min ESPN playoff-odds % to count as "in contention"
+
+
+def _mlb_contending_team_ids(threshold=MLB_CONTENTION_THRESHOLD):
+    """Returns the set of MLB team ids ESPN currently gives at least
+    `threshold`% odds of making the playoffs. Every MLB series (30 teams,
+    ~15 concurrent matchups) would be too much text, so this replaces a
+    static "big market" list with teams that are actually still in the
+    hunt right now."""
+    try:
+        response = requests.get(MLB_STANDINGS_URL, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+    except Exception:
+        return set()
+
+    contenders = set()
+    for league in data.get('children', []):
+        for entry in league.get('standings', {}).get('entries', []):
+            stats = {stat['name']: stat for stat in entry['stats']}
+            pct = stats.get('playoffPercent', {}).get('value')
+            if pct is not None and pct >= threshold:
+                contenders.add(entry['team']['id'])
+
+    return contenders
 
 
 def _mlb_series_record(games):
@@ -231,19 +237,12 @@ def _mlb_series_record(games):
     return home_wins, away_wins, completed_count == len(games)
 
 
-def _mlb_team_label(team):
-    name = team['displayName']
-    return f"⭐ {name}" if team['id'] in FEATURED_MLB_TEAM_IDS else name
-
-
 def _mlb_series_line(games):
     games = sorted(games, key=lambda e: e['date'])
     competition = games[0]['competitions'][0]
     competitors = competition['competitors']
-    home_team = next(c for c in competitors if c['homeAway'] == 'home')['team']
-    away_team = next(c for c in competitors if c['homeAway'] == 'away')['team']
-    home_name = _mlb_team_label(home_team)
-    away_name = _mlb_team_label(away_team)
+    home_name = next(c for c in competitors if c['homeAway'] == 'home')['team']['displayName']
+    away_name = next(c for c in competitors if c['homeAway'] == 'away')['team']['displayName']
 
     first_date = datetime.datetime.fromisoformat(games[0]['date'].replace('Z', '+00:00')).astimezone(EASTERN)
     last_date = datetime.datetime.fromisoformat(games[-1]['date'].replace('Z', '+00:00')).astimezone(EASTERN)
@@ -288,8 +287,10 @@ def mlb_series_synopsis():
     if not events_by_id:
         return "No MLB games scheduled this week."
 
+    contenders = _mlb_contending_team_ids()
+
     def is_featured(team_id):
-        return team_id in FEATURED_MLB_TEAM_IDS or team_id in BIG_MLB_TEAM_IDS
+        return team_id in FEATURED_MLB_TEAM_IDS or team_id in contenders
 
     series_map = {}
     for event in events_by_id.values():
