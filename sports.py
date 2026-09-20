@@ -1,7 +1,11 @@
 import requests
 import datetime
+import time
+import logging
 import concurrent.futures
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
 
 # ESPN's public (unofficial, no key needed) scoreboard/standings API. The
 # scoreboard always reflects the current match week/day for a league,
@@ -46,6 +50,31 @@ SOCCER_PAGE_LIMIT = 1900  # leaves headroom under Discord's 2000-char cap
 
 EASTERN = ZoneInfo("America/New_York")
 
+# Short-lived cache for ESPN's JSON responses. ESPN's scoreboard/standings
+# API is unofficial and undocumented, so this both avoids duplicate
+# round-trips within a single command (e.g. /ucl checking the phase and
+# then fetching the bracket from the same URL) or across near-simultaneous
+# commands from different users, and gives a little cushion against getting
+# rate-limited. Live scores are only ever this many seconds stale.
+_CACHE_TTL_SECONDS = 15
+_response_cache = {}
+
+
+def _get_json(url, params=None):
+    """GETs a JSON endpoint, serving a cached response if the same
+    url+params were fetched within _CACHE_TTL_SECONDS."""
+    key = (url, tuple(sorted((params or {}).items())))
+    cached = _response_cache.get(key)
+    now = time.monotonic()
+    if cached and now - cached[0] < _CACHE_TTL_SECONDS:
+        return cached[1]
+
+    response = requests.get(url, params=params, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+    _response_cache[key] = (now, data)
+    return data
+
 
 def _soccer_scoreboard_url(slug):
     return f"{ESPN_SITE_BASE}/soccer/{slug}/scoreboard"
@@ -56,16 +85,12 @@ def _fetch_scoreboard(url, date=None, params=None):
     # ESPN's `dates` filter only accepts a single YYYYMMDD day, not a range.
     if date:
         request_params['dates'] = date.strftime('%Y%m%d')
-    response = requests.get(url, params=request_params, timeout=10)
-    response.raise_for_status()
-    return response.json()
+    return _get_json(url, params=request_params)
 
 
 def _fetch_standings(slug):
     url = f"{ESPN_STANDINGS_BASE}/soccer/{slug}/standings"
-    response = requests.get(url, timeout=10)
-    response.raise_for_status()
-    return response.json()
+    return _get_json(url)
 
 
 def _week_dates(start_weekday):
@@ -126,7 +151,8 @@ def nfl_synopsis():
         # ESPN's default NFL scoreboard already spans the full Thu-Sun-Mon
         # week as one "current week", so no date filtering is needed here.
         data = _fetch_scoreboard(NFL_SCOREBOARD_URL)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"nfl_synopsis failed: {e}")
         return "Couldn't reach the NFL scores right now. Try again later!"
 
     events = data.get('events', [])
@@ -146,7 +172,8 @@ def nfl_live_matches():
     excludes finished and upcoming games entirely."""
     try:
         data = _fetch_scoreboard(NFL_SCOREBOARD_URL)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"nfl_live_matches failed: {e}")
         return "Couldn't reach the NFL scores right now. Try again later!"
 
     events = [event for event in data.get('events', []) if _is_live(event)]
@@ -162,7 +189,8 @@ def nfl_results_today():
     unlike /nfl, this excludes in-progress and upcoming games entirely."""
     try:
         data = _fetch_scoreboard(NFL_SCOREBOARD_URL)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"nfl_results_today failed: {e}")
         return "Couldn't reach the NFL scores right now. Try again later!"
 
     today = datetime.datetime.now(EASTERN).date()
@@ -184,9 +212,7 @@ def _nfl_stat(entry, name):
 def _fetch_nfl_standings():
     # level=3 asks ESPN for conference -> division -> team, instead of the
     # default conference -> team grouping which loses division info.
-    response = requests.get(NFL_STANDINGS_URL, params={'level': 3}, timeout=10)
-    response.raise_for_status()
-    return response.json()
+    return _get_json(NFL_STANDINGS_URL, params={'level': 3})
 
 
 def _nfl_team_line(entry):
@@ -240,7 +266,8 @@ def nfl_standings_pages():
     teams still in the hunt for a wild card berth."""
     try:
         data = _fetch_nfl_standings()
-    except Exception:
+    except Exception as e:
+        logger.warning(f"nfl_standings_pages failed: {e}")
         return [("Standings", "Couldn't reach NFL standings right now. Try again later!")]
 
     return [
@@ -281,7 +308,8 @@ def cfb_synopsis():
         # ESPN's default scoreboard only returns a small curated subset.
         # groups=80 selects FBS and a high limit pulls the full week's slate.
         data = _fetch_scoreboard(CFB_SCOREBOARD_URL, params={'groups': 80, 'limit': 400})
-    except Exception:
+    except Exception as e:
+        logger.warning(f"cfb_synopsis failed: {e}")
         return "Couldn't reach the college football scores right now. Try again later!"
 
     events = data.get('events', [])
@@ -331,10 +359,9 @@ def _mlb_contending_team_ids(threshold=MLB_CONTENTION_THRESHOLD):
     static "big market" list with teams that are actually still in the
     hunt right now."""
     try:
-        response = requests.get(MLB_STANDINGS_URL, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-    except Exception:
+        data = _get_json(MLB_STANDINGS_URL)
+    except Exception as e:
+        logger.warning(f"_mlb_contending_team_ids failed: {e}")
         return set()
 
     contenders = set()
@@ -406,14 +433,18 @@ def mlb_series_synopsis():
     series' overall record so far."""
     week_dates = _week_dates(start_weekday=0)
 
-    events_by_id = {}
-    for day in week_dates:
+    def fetch(day):
         try:
-            data = _fetch_scoreboard(MLB_SCOREBOARD_URL, date=day)
-        except Exception:
-            continue
-        for event in data.get('events', []):
-            events_by_id[event['id']] = event
+            return _fetch_scoreboard(MLB_SCOREBOARD_URL, date=day).get('events', [])
+        except Exception as e:
+            logger.debug(f"mlb_series_synopsis: failed to fetch {day}: {e}")
+            return []
+
+    events_by_id = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(week_dates)) as executor:
+        for events in executor.map(fetch, week_dates):
+            for event in events:
+                events_by_id[event['id']] = event
 
     if not events_by_id:
         return "No MLB games scheduled this week."
@@ -484,7 +515,8 @@ def soccer_pages():
         name, slug, day = job
         try:
             events = _fetch_scoreboard(_soccer_scoreboard_url(slug), date=day).get('events', [])
-        except Exception:
+        except Exception as e:
+            logger.debug(f"soccer_pages: failed to fetch {slug} on {day}: {e}")
             events = []
         return name, events
 
@@ -572,7 +604,8 @@ def live_soccer_matches():
         name, slug = job
         try:
             events = _fetch_scoreboard(_soccer_scoreboard_url(slug), date=today).get('events', [])
-        except Exception:
+        except Exception as e:
+            logger.debug(f"live_soccer_matches: failed to fetch {slug}: {e}")
             events = []
         return name, [e for e in events if _is_live(e)]
 
@@ -607,7 +640,8 @@ def soccer_results_today():
         name, slug = job
         try:
             events = _fetch_scoreboard(_soccer_scoreboard_url(slug), date=today).get('events', [])
-        except Exception:
+        except Exception as e:
+            logger.debug(f"soccer_results_today: failed to fetch {slug}: {e}")
             events = []
         return name, [e for e in events if _is_final(e)]
 
@@ -676,7 +710,8 @@ def _live_status_by_team(slug):
     try:
         today = datetime.datetime.now(EASTERN).date()
         data = _fetch_scoreboard(_soccer_scoreboard_url(slug), date=today)
-    except Exception:
+    except Exception as e:
+        logger.debug(f"_live_status_by_team failed for {slug}: {e}")
         return {}
 
     statuses = {}
@@ -753,7 +788,8 @@ def _league_standings(league_title, slug, color_fn=None):
     try:
         data = _fetch_standings(slug)
         entries = data['children'][0]['standings']['entries']
-    except Exception:
+    except Exception as e:
+        logger.warning(f"_league_standings({league_title}) failed: {e}")
         return [f"Couldn't reach {league_title} standings right now. Try again later!"]
 
     entries = sorted(entries, key=lambda e: int(_stat_map(e).get('rank') or 0))
@@ -780,7 +816,8 @@ def _ucl_current_phase():
     try:
         data = _fetch_scoreboard(_soccer_scoreboard_url('uefa.champions'))
         calendar_entries = data['leagues'][0]['calendar'][0]['entries']
-    except Exception:
+    except Exception as e:
+        logger.warning(f"_ucl_current_phase failed: {e}")
         return None
 
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -820,7 +857,8 @@ def _ucl_bracket(phase_label):
     full multi-round tree, since later rounds aren't drawn/known yet."""
     try:
         data = _fetch_scoreboard(_soccer_scoreboard_url('uefa.champions'))
-    except Exception:
+    except Exception as e:
+        logger.warning(f"_ucl_bracket failed: {e}")
         return ["Couldn't reach the Champions League bracket right now. Try again later!"]
 
     events = data.get('events', [])

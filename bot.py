@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands, tasks
 import asyncio
 import datetime
+import logging
 from zoneinfo import ZoneInfo
 import responses
 import botFunctions as bf
@@ -10,6 +11,12 @@ import sports
 import f1
 import os
 from dotenv import load_dotenv
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -323,7 +330,7 @@ def run_discord_bot():
         sotd.start()
         new_chapter_announcements.start()
         f1_updates.start()
-        print(f'{client.user} is now running!')
+        logger.info(f'{client.user} is now running!')
         await client.tree.sync()
 
     client.run(TOKEN)
@@ -334,7 +341,7 @@ async def sendMessage(message, user_message, is_private):
         response = responses.getResponse(user_message)
         await message.author.send(response) if is_private else await message.channel.send(response)
     except Exception as e:
-        print(e)
+        logger.exception(f"Failed to send response message: {e}")
 
 async def sendTopSongs(message):
     songs, artist, rank = await asyncio.to_thread(bf.topsongs)

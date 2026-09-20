@@ -1,9 +1,13 @@
 import requests
 import os
 import json
+import time
+import logging
 import datetime
 import concurrent.futures
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
 
 # ESPN's public (unofficial, no key needed) racing API. The "site" API gives
 # the race weekend's session list (with embedded driver names), while the
@@ -38,10 +42,26 @@ QUALI_DAY_BANNERS = {'Qual': "QUALIFYING", 'SS': "SPRINT QUALIFYING"}
 RACE_DAY_BANNERS = {'Race': "RACE", 'SR': "SPRINT RACE"}
 
 
+# Short-lived cache, mirroring sports.py's -- avoids duplicate round-trips
+# to ESPN's unofficial API within the same poll/command (e.g. the grid
+# recap and the race results both touching the same event during one
+# check_f1_updates() tick).
+_CACHE_TTL_SECONDS = 15
+_response_cache = {}
+
+
 def _fetch_json(url, params=None):
+    key = (url, tuple(sorted((params or {}).items())))
+    cached = _response_cache.get(key)
+    now = time.monotonic()
+    if cached and now - cached[0] < _CACHE_TTL_SECONDS:
+        return cached[1]
+
     response = requests.get(url, params=params, timeout=10)
     response.raise_for_status()
-    return response.json()
+    data = response.json()
+    _response_cache[key] = (now, data)
+    return data
 
 
 def _load_state():
@@ -73,7 +93,8 @@ def _event_location(event_id):
         address = circuit.get('address', {})
         place = ", ".join(p for p in [address.get('city'), address.get('country')] if p)
         return f"{circuit['fullName']} — {place}" if place else circuit.get('fullName')
-    except Exception:
+    except Exception as e:
+        logger.debug(f"_event_location failed for event {event_id}: {e}")
         return None
 
 
@@ -86,7 +107,8 @@ def _competitor_result(event_id, competition_id, competitor):
         stats = {s['name']: s['displayValue'] for s in data['splits']['categories'][0]['stats']}
         name = competitor['athlete']['displayName']
         return stats.get('place', '-'), name, stats.get('totalTime', '-')
-    except Exception:
+    except Exception as e:
+        logger.debug(f"_competitor_result failed for competitor {competitor.get('id')}: {e}")
         return None
 
 
@@ -145,7 +167,8 @@ def check_f1_updates():
     across restarts or repeated polls."""
     try:
         event = _current_event()
-    except Exception:
+    except Exception as e:
+        logger.warning(f"check_f1_updates failed: {e}")
         return []
 
     if not event:
@@ -211,7 +234,8 @@ def f1_status():
     are happening today."""
     try:
         event = _current_event()
-    except Exception:
+    except Exception as e:
+        logger.warning(f"f1_status failed: {e}")
         return "Couldn't reach the F1 schedule right now. Try again later!"
 
     if not event:
@@ -273,7 +297,8 @@ def f1_standings():
     try:
         data = _fetch_json(F1_SITE_STANDINGS)
         children = {child['name']: child for child in data.get('children', [])}
-    except Exception:
+    except Exception as e:
+        logger.warning(f"f1_standings failed: {e}")
         return ["Couldn't reach F1 standings right now. Try again later!"]
 
     messages = []
