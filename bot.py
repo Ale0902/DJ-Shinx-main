@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 EASTERN = ZoneInfo("America/New_York")
 
+# Commands that work normally but are left out of /help entirely -- easter
+# eggs that only show up if you already know about them.
+HIDDEN_COMMANDS = {'vini'}
+
 # Which section of /help each command is listed under. Anything not listed
 # here falls into an "Other" section so a forgotten new command still shows
 # up instead of silently vanishing from the list.
@@ -41,7 +45,6 @@ COMMAND_CATEGORIES = {
     'recsong': 'Music',
     'top5songs': 'Music',
     'hello': 'Fun',
-    'vini': 'Fun',
     'rolld6': 'Fun',
     'rolld20': 'Fun',
     'ping': 'Fun',
@@ -285,6 +288,8 @@ def run_discord_bot():
     async def help_command(ctx: commands.Context):
         by_category = {category: [] for category in CATEGORY_ORDER}
         for command in client.commands:
+            if command.name in HIDDEN_COMMANDS:
+                continue
             by_category.setdefault(COMMAND_CATEGORIES.get(command.name, 'Other'), []).append(command)
 
         lines = ["## DJ Shinx Commands", "*(use with / or !)*"]
