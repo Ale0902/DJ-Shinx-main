@@ -161,9 +161,13 @@ def check_f1_updates():
 
     weekend_start = datetime.datetime.fromisoformat(event['date'].replace('Z', '+00:00')).astimezone(EASTERN).date()
     if 'race_week' not in done and today >= weekend_start:
+        is_sprint_weekend = any(
+            c['type']['abbreviation'] in ('SS', 'SR') for c in event.get('competitions', [])
+        )
+        headline = "IT'S RACE WEEK + SPRINT!!!" if is_sprint_weekend else "IT'S RACE WEEK!!"
         location = _event_location(event_id) or "location TBD"
         messages.append(
-            f"# IT'S RACE WEEK!! 🏎️🏁\n**{event['name']}**\nWhere: {location}"
+            f"# {headline} 🏎️🏁\n**{event['name']}**\nWhere: {location}"
         )
         done.append('race_week')
 
