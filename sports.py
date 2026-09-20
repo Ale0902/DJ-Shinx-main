@@ -15,11 +15,27 @@ MLB_SCOREBOARD_URL = f"{ESPN_SITE_BASE}/baseball/mlb/scoreboard"
 
 USF_TEAM_ID = "58"  # South Florida Bulls, per ESPN
 
-SOCCER_LEAGUES = [
-    ("Premier League", "eng.1"),
-    ("La Liga", "esp.1"),
-    ("Champions League", "uefa.champions"),
+# Each competition's ESPN slug(s). Most map to a single slug; World Cup
+# Qualifying is split by confederation on ESPN, so those results get merged
+# into one "World Cup Qualifiers" page.
+SOCCER_COMPETITIONS = [
+    ("Premier League", ["eng.1"]),
+    ("La Liga", ["esp.1"]),
+    ("Champions League", ["uefa.champions"]),
+    ("World Cup", ["fifa.world"]),
+    ("European Championship", ["uefa.euro"]),
+    ("Copa América", ["conmebol.america"]),
+    ("Nations League", ["uefa.nations"]),
+    ("World Cup Qualifiers", [
+        "fifa.worldq.uefa",
+        "fifa.worldq.conmebol",
+        "fifa.worldq.concacaf",
+        "fifa.worldq.afc",
+        "fifa.worldq.caf",
+    ]),
 ]
+
+SOCCER_PAGE_LIMIT = 1900  # leaves headroom under Discord's 2000-char cap
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -309,43 +325,70 @@ def mlb_series_synopsis():
     return header + "\n" + "\n".join(line for _, line in lines)
 
 
-def soccer_synopsis():
-    """Returns a synopsis of this week's Premier League, La Liga, and
-    Champions League matches with live/final scores."""
+def _truncate_page(body, limit=SOCCER_PAGE_LIMIT):
+    """Trims a page's match list to fit Discord's message limit, noting how
+    many matches were cut rather than letting a busy competition (e.g. World
+    Cup Qualifiers across five confederations) overflow the message."""
+    if len(body) <= limit:
+        return body
+
+    lines = body.split("\n")
+    kept = []
+    total = 0
+    for line in lines:
+        total += len(line) + 1
+        if total > limit:
+            break
+        kept.append(line)
+
+    remaining = len(lines) - len(kept)
+    if remaining > 0:
+        kept.append(f"...and {remaining} more match{'es' if remaining != 1 else ''}.")
+    return "\n".join(kept)
+
+
+def soccer_pages():
+    """Returns a list of (title, page_text) tuples, one per competition in
+    SOCCER_COMPETITIONS, each showing that competition's matches for the
+    current calendar week. Backs the /soccer command's button paginator so
+    every competition gets its own page instead of a separate command."""
     # ESPN's soccer scoreboard only accepts a single day at a time, and its
     # default "current" window doesn't reliably include Sunday, so fetch
     # every day of the calendar week (Monday-through-Sunday) and merge.
     week_dates = _week_dates(start_weekday=0)
 
-    def fetch_day(args):
-        league_name, slug, day = args
+    jobs = [
+        (name, slug, day)
+        for name, slugs in SOCCER_COMPETITIONS
+        for slug in slugs
+        for day in week_dates
+    ]
+
+    def fetch(job):
+        name, slug, day = job
         try:
-            url = _soccer_scoreboard_url(slug)
-            return league_name, _fetch_scoreboard(url, date=day).get('events', [])
+            events = _fetch_scoreboard(_soccer_scoreboard_url(slug), date=day).get('events', [])
         except Exception:
-            return league_name, []
+            events = []
+        return name, events
 
-    jobs = [(league_name, slug, day) for league_name, slug in SOCCER_LEAGUES for day in week_dates]
-    events_by_league = {league_name: {} for league_name, _ in SOCCER_LEAGUES}
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as executor:
-        for league_name, events in executor.map(fetch_day, jobs):
+    events_by_competition = {name: {} for name, _ in SOCCER_COMPETITIONS}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(jobs))) as executor:
+        for name, events in executor.map(fetch, jobs):
             for event in events:
-                events_by_league[league_name][event['id']] = event
+                events_by_competition[name][event['id']] = event
 
-    sections = []
-    for league_name, _ in SOCCER_LEAGUES:
-        events = sorted(events_by_league[league_name].values(), key=lambda e: e['date'])
-        if not events:
-            continue
+    pages = []
+    for name, _ in SOCCER_COMPETITIONS:
+        events = sorted(events_by_competition[name].values(), key=lambda e: e['date'])
+        if events:
+            lines = [_format_game_line(event, is_soccer=True) for event in events]
+            body = f"## {name}\n" + "\n".join(lines)
+        else:
+            body = f"## {name}\nNo matches scheduled this week."
+        pages.append((name, _truncate_page(body)))
 
-        lines = [_format_game_line(event, is_soccer=True) for event in events]
-        sections.append(f"**{league_name}**\n" + "\n".join(lines))
-
-    if not sections:
-        return "Couldn't find any soccer matches this week."
-
-    return "## This Week's Soccer Matches!\n\n" + "\n\n".join(sections)
+    return pages
 
 
 STANDINGS_HEADER = f"{'#':>2} {'Team':<22} {'P':>2} {'W':>2} {'D':>2} {'L':>2} {'GF':>3} {'GA':>3} {'GD':>4} {'Pts':>3}"

@@ -23,6 +23,57 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 if not TOKEN:
     raise RuntimeError(f"DISCORD_TOKEN not found. Make sure it is set in {os.path.abspath(ENV_PATH)}")
 
+
+class SoccerPaginator(discord.ui.View):
+    """Lets the /soccer command show one competition per page, flipped
+    through with buttons instead of needing a separate command per league."""
+
+    def __init__(self, pages, author_id):
+        super().__init__(timeout=180)
+        self.pages = pages  # list of (title, page_text)
+        self.index = 0
+        self.author_id = author_id
+        self.message = None
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.previous_button.disabled = self.index == 0
+        self.next_button.disabled = self.index == len(self.pages) - 1
+
+    def content(self):
+        title, body = self.pages[self.index]
+        return f"{body}\n\n*Page {self.index + 1}/{len(self.pages)} — {title}*"
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "Only the person who ran /soccer can flip pages.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index -= 1
+        self._update_buttons()
+        await interaction.response.edit_message(content=self.content(), view=self)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index += 1
+        self._update_buttons()
+        await interaction.response.edit_message(content=self.content(), view=self)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
 def run_discord_bot():
     intents = discord.Intents.default()
     intents.message_content = True
@@ -87,12 +138,13 @@ def run_discord_bot():
         for chunk in llmask.chunk_response(result):
             await ctx.followup.send(chunk)
 
-    @client.tree.command(name="soccer", description="This week's Premier League, La Liga, and Champions League matches")
+    @client.tree.command(name="soccer", description="This week's matches, one page per competition")
     async def soccer(ctx: discord.Interaction):
         await ctx.response.defer()
-        result = await asyncio.to_thread(sports.soccer_synopsis)
-        for chunk in llmask.chunk_response(result):
-            await ctx.followup.send(chunk)
+        pages = await asyncio.to_thread(sports.soccer_pages)
+        view = SoccerPaginator(pages, author_id=ctx.user.id)
+        message = await ctx.followup.send(view.content(), view=view)
+        view.message = message
 
     @client.tree.command(name="premtable", description="Current Premier League standings")
     async def premtable(ctx: discord.Interaction):
