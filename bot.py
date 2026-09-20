@@ -19,6 +19,7 @@ EASTERN = ZoneInfo("America/New_York")
 COMMAND_CATEGORIES = {
     'nfl': 'Sports',
     'nfllive': 'Sports',
+    'nflstandings': 'Sports',
     'cfb': 'Sports',
     'mlb': 'Sports',
     'soccer': 'Sports',
@@ -52,15 +53,18 @@ if not TOKEN:
     raise RuntimeError(f"DISCORD_TOKEN not found. Make sure it is set in {os.path.abspath(ENV_PATH)}")
 
 
-class SoccerPaginator(discord.ui.View):
-    """Lets the /soccer command show one competition per page, flipped
-    through with buttons instead of needing a separate command per league."""
+class PaginatorView(discord.ui.View):
+    """Shows a list of (title, page_text) pages one at a time, flipped
+    through with buttons -- used by any command that'd otherwise need a
+    separate command per page (e.g. /soccer per competition, /nflstandings
+    per view)."""
 
-    def __init__(self, pages, author_id):
+    def __init__(self, pages, author_id, command_name):
         super().__init__(timeout=180)
         self.pages = pages  # list of (title, page_text)
         self.index = 0
         self.author_id = author_id
+        self.command_name = command_name
         self.message = None
         self._update_buttons()
 
@@ -75,7 +79,7 @@ class SoccerPaginator(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
             await interaction.response.send_message(
-                "Only the person who ran /soccer can flip pages.", ephemeral=True
+                f"Only the person who ran /{self.command_name} can flip pages.", ephemeral=True
             )
             return False
         return True
@@ -182,7 +186,15 @@ def run_discord_bot():
         if not pages:
             await ctx.send("No matches scheduled in any tracked competition this week.")
             return
-        view = SoccerPaginator(pages, author_id=ctx.author.id)
+        view = PaginatorView(pages, author_id=ctx.author.id, command_name="soccer")
+        message = await ctx.send(view.content(), view=view)
+        view.message = message
+
+    @client.hybrid_command(name="nflstandings", description="NFL standings by division, and the current playoff picture")
+    async def nflstandings(ctx: commands.Context):
+        await ctx.defer()
+        pages = await asyncio.to_thread(sports.nfl_standings_pages)
+        view = PaginatorView(pages, author_id=ctx.author.id, command_name="nflstandings")
         message = await ctx.send(view.content(), view=view)
         view.message = message
 

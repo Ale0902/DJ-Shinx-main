@@ -12,6 +12,13 @@ ESPN_STANDINGS_BASE = "https://site.api.espn.com/apis/v2/sports"
 NFL_SCOREBOARD_URL = f"{ESPN_SITE_BASE}/football/nfl/scoreboard"
 CFB_SCOREBOARD_URL = f"{ESPN_SITE_BASE}/football/college-football/scoreboard"
 MLB_SCOREBOARD_URL = f"{ESPN_SITE_BASE}/baseball/mlb/scoreboard"
+NFL_STANDINGS_URL = f"{ESPN_STANDINGS_BASE}/football/nfl/standings"
+
+# Per conference: seeds 1-4 are the division winners, 5-7 are the wild card
+# spots, and the next few are shown as still "in the hunt" even though
+# they're currently outside the 7-team playoff picture.
+NFL_PLAYOFF_SPOTS = 7
+NFL_HUNT_SIZE = 3
 
 USF_TEAM_ID = "58"  # South Florida Bulls, per ESPN
 
@@ -148,6 +155,81 @@ def nfl_live_matches():
 
     lines = [_format_game_line(event) for event in events]
     return "## Live NFL Right Now!\n" + "\n".join(lines)
+
+
+def _nfl_stat(entry, name):
+    for stat in entry['stats']:
+        if stat['name'] == name:
+            return stat.get('displayValue')
+    return None
+
+
+def _fetch_nfl_standings():
+    # level=3 asks ESPN for conference -> division -> team, instead of the
+    # default conference -> team grouping which loses division info.
+    response = requests.get(NFL_STANDINGS_URL, params={'level': 3}, timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
+def _nfl_team_line(entry):
+    team = entry['team'].get('shortDisplayName') or entry['team']['displayName']
+    record = _nfl_stat(entry, 'overall') or '-'
+    streak = _nfl_stat(entry, 'streak')
+    return f"{team} — {record} ({streak})" if streak else f"{team} — {record}"
+
+
+def _nfl_division_page(standings_data):
+    lines = ["## NFL Standings by Division"]
+    for conference in standings_data.get('children', []):
+        for division in conference.get('children', []):
+            entries = division.get('standings', {}).get('entries', [])
+            entries.sort(key=lambda e: float(_nfl_stat(e, 'winPercent') or 0), reverse=True)
+            lines.append(f"\n**{division['name']}**")
+            lines.extend(_nfl_team_line(entry) for entry in entries)
+    return "\n".join(lines)
+
+
+def _nfl_playoff_page(standings_data):
+    lines = ["## NFL Playoff Picture"]
+    for conference in standings_data.get('children', []):
+        entries = [
+            entry
+            for division in conference.get('children', [])
+            for entry in division.get('standings', {}).get('entries', [])
+        ]
+        entries.sort(key=lambda e: int(_nfl_stat(e, 'playoffSeed') or 99))
+
+        division_leaders = entries[:4]
+        wild_card = entries[4:NFL_PLAYOFF_SPOTS]
+        in_the_hunt = entries[NFL_PLAYOFF_SPOTS:NFL_PLAYOFF_SPOTS + NFL_HUNT_SIZE]
+
+        lines.append(f"\n**{conference['name']}**")
+        lines.append("Division Leaders:")
+        lines.extend(f"  {i}. {_nfl_team_line(e)}" for i, e in enumerate(division_leaders, start=1))
+        lines.append("Wild Card:")
+        lines.extend(f"  {i}. {_nfl_team_line(e)}" for i, e in enumerate(wild_card, start=5))
+        if in_the_hunt:
+            lines.append("In the Hunt:")
+            lines.extend(f"  {_nfl_team_line(e)}" for e in in_the_hunt)
+
+    return "\n".join(lines)
+
+
+def nfl_standings_pages():
+    """Returns [(title, page_text)] for the /nflstandings paginator: one
+    page grouping every team by division, and one page showing the current
+    playoff picture -- division leaders, wild card spots, and the next few
+    teams still in the hunt for a wild card berth."""
+    try:
+        data = _fetch_nfl_standings()
+    except Exception:
+        return [("Standings", "Couldn't reach NFL standings right now. Try again later!")]
+
+    return [
+        ("Division Standings", _nfl_division_page(data)),
+        ("Playoff Picture", _nfl_playoff_page(data)),
+    ]
 
 
 def _cfb_rank(competitor):
