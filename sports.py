@@ -78,20 +78,20 @@ def _format_game_line(event, is_soccer=False, label_fn=None):
 
     if is_soccer:
         matchup = f"{home_name} vs {away_name}"
-        matchup_with_scores = f"{home_name} {home['score']} vs {away_name} {away['score']}"
+        score = f"**{home['score']}-{away['score']}**"
     else:
         matchup = f"{away_name} @ {home_name}"
-        matchup_with_scores = f"{away_name} {away['score']} @ {home_name} {home['score']}"
+        score = f"**{away['score']}-{home['score']}**"
 
     if state == 'in':
         clock = status.get('displayClock', '')
         if is_soccer:
-            return f"{sport_emoji} 🔴 {day_label}: {matchup_with_scores} ({clock})"
+            return f"{sport_emoji} 🔴 {day_label}: {matchup} {score} ({clock})"
         period = status.get('period', '')
-        return f"{sport_emoji} 🔴 {day_label}: {matchup_with_scores} (Q{period}, {clock})"
+        return f"{sport_emoji} 🔴 {day_label}: {matchup} {score} (Q{period}, {clock})"
     elif state == 'post':
         detail = status.get('type', {}).get('description', 'Final')
-        return f"{sport_emoji} {day_label}: {matchup_with_scores} ({detail})"
+        return f"{sport_emoji} {day_label}: {matchup} {score} ({detail})"
     else:
         return f"{sport_emoji} {day_label}: {matchup} — {_format_time(game_time)}"
 
