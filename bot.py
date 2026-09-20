@@ -13,6 +13,33 @@ from dotenv import load_dotenv
 
 EASTERN = ZoneInfo("America/New_York")
 
+# Which section of /help each command is listed under. Anything not listed
+# here falls into an "Other" section so a forgotten new command still shows
+# up instead of silently vanishing from the list.
+COMMAND_CATEGORIES = {
+    'nfl': 'Sports',
+    'cfb': 'Sports',
+    'mlb': 'Sports',
+    'soccer': 'Sports',
+    'livesoccer': 'Sports',
+    'prem': 'Sports',
+    'laliga': 'Sports',
+    'ucl': 'Sports',
+    'f1': 'Sports',
+    'f1standings': 'Sports',
+    'recsong': 'Music',
+    'top5songs': 'Music',
+    'hello': 'Fun',
+    'rolld6': 'Fun',
+    'rolld20': 'Fun',
+    'ping': 'Fun',
+    'coin_flip': 'Fun',
+    '8ball': 'Fun',
+    'status': 'Fun',
+    'ask': 'AI',
+}
+CATEGORY_ORDER = ['Sports', 'Music', 'Fun', 'AI']
+
 # Folder that contains this script, so file paths work on Windows and Linux
 BASE = os.path.dirname(os.path.abspath(__file__))
 
@@ -208,9 +235,20 @@ def run_discord_bot():
 
     @client.hybrid_command(name="help", description="Lists every command DJ Shinx offers")
     async def help_command(ctx: commands.Context):
-        lines = ["## DJ Shinx Commands", "*(use with / or !)*", ""]
-        for command in sorted(client.commands, key=lambda c: c.name):
-            lines.append(f"**{command.name}** — {command.description or 'No description.'}")
+        by_category = {category: [] for category in CATEGORY_ORDER}
+        other = []
+        for command in client.commands:
+            by_category.get(COMMAND_CATEGORIES.get(command.name), other).append(command)
+
+        lines = ["## DJ Shinx Commands", "*(use with / or !)*"]
+        for category in [*CATEGORY_ORDER, 'Other']:
+            group = other if category == 'Other' else by_category[category]
+            if not group:
+                continue
+            lines.append(f"\n**{category}**")
+            for command in sorted(group, key=lambda c: c.name):
+                lines.append(f"`{command.name}` — {command.description or 'No description.'}")
+
         for chunk in llmask.chunk_response("\n".join(lines)):
             await ctx.send(chunk)
 
