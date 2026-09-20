@@ -31,6 +31,11 @@ SESSION_LABELS = {
 # so the race-day announcement can recap the right one.
 GRID_SESSION_FOR_RACE = {'Race': 'Qual', 'SR': 'SS'}
 
+# Banner wording for each qualifying/race-type session, so sprint weekends
+# get the same day-of announcement treatment as the main sessions.
+QUALI_DAY_BANNERS = {'Qual': "QUALIFYING", 'SS': "SPRINT QUALIFYING"}
+RACE_DAY_BANNERS = {'Race': "RACE", 'SR': "SPRINT RACE"}
+
 
 def _fetch_json(url, params=None):
     response = requests.get(url, params=params, timeout=10)
@@ -172,14 +177,16 @@ def check_f1_updates():
         completed = competition.get('status', {}).get('type', {}).get('completed', False)
 
         day_marker = f"day:{comp_id}"
-        if abbrev == 'Qual' and day_marker not in done and today == comp_date.date():
-            messages.append(f"# IT'S QUALIFYING DAY!! ⏱️🏎️\n**{label}** for the {event['name']}")
+        if abbrev in QUALI_DAY_BANNERS and day_marker not in done and today == comp_date.date():
+            banner = QUALI_DAY_BANNERS[abbrev]
+            messages.append(f"# IT'S {banner} DAY!! ⏱️🏎️\n**{label}** for the {event['name']}")
             done.append(day_marker)
 
-        if abbrev == 'Race' and day_marker not in done and today == comp_date.date():
+        if abbrev in RACE_DAY_BANNERS and day_marker not in done and today == comp_date.date():
+            banner = RACE_DAY_BANNERS[abbrev]
             recap = _grid_recap(event_id, competitions, abbrev)
             recap_text = f"\n\n{recap}" if recap else ""
-            messages.append(f"# IT'S RACE DAY!! 🏎️🏁\n**{event['name']}**{recap_text}")
+            messages.append(f"# IT'S {banner} DAY!! 🏎️🏁\n**{event['name']}**{recap_text}")
             done.append(day_marker)
 
         results_marker = f"results:{comp_id}"
