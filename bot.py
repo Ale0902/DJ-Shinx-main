@@ -165,7 +165,10 @@ def run_discord_bot():
         await ctx.send("https://x.com/vinijr/status/1851023004496789695?s=20")
 
     @client.hybrid_command(name="8ball", description="Shakes an eight ball")
-    async def eightball(ctx: commands.Context):
+    @discord.app_commands.describe(question="What do you want to ask the eight ball?")
+    async def eightball(ctx: commands.Context, *, question: str = None):
+        if question:
+            await ctx.send(f"**Question from {ctx.author.display_name}:** {question}")
         await ctx.send(bf.eightball())
 
     @client.hybrid_command(name="nfl", description="This week's NFL games and live scores")
