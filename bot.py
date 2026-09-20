@@ -35,10 +35,10 @@ COMMAND_CATEGORIES = {
     'ping': 'Fun',
     'coin_flip': 'Fun',
     '8ball': 'Fun',
-    'mcstatus': 'Fun',
+    'mcstatus': 'Other',
     'ask': 'AI',
 }
-CATEGORY_ORDER = ['Sports', 'Music', 'Fun', 'AI']
+CATEGORY_ORDER = ['Sports', 'Music', 'Fun', 'AI', 'Other']
 
 # Folder that contains this script, so file paths work on Windows and Linux
 BASE = os.path.dirname(os.path.abspath(__file__))
