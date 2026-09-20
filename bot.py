@@ -137,7 +137,7 @@ def run_discord_bot():
     @client.tree.command(name="ask", description="Ask DJ Shinx's AI brain a question")
     @discord.app_commands.describe(question="What do you want to ask?")
     async def ask(ctx: discord.Interaction, question: str):
-        await ctx.response.defer()
+        await ctx.response.send_message(f"**Question:** {question}")
         result = await asyncio.to_thread(llmask.ask, question)
         for chunk in llmask.chunk_response(result):
             await ctx.followup.send(chunk)
