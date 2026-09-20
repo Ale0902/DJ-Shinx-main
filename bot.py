@@ -158,22 +158,22 @@ def run_discord_bot():
         for chunk in llmask.chunk_response(result):
             await ctx.send(chunk)
 
-    @client.hybrid_command(name="premtable", description="Current Premier League standings")
-    async def premtable(ctx: commands.Context):
+    @client.hybrid_command(name="prem", description="Current Premier League standings")
+    async def prem(ctx: commands.Context):
         await ctx.defer()
         messages = await asyncio.to_thread(sports.premier_league_table)
         for message in messages:
             await ctx.send(message)
 
-    @client.hybrid_command(name="laligatable", description="Current La Liga standings")
-    async def laligatable(ctx: commands.Context):
+    @client.hybrid_command(name="laliga", description="Current La Liga standings")
+    async def laliga(ctx: commands.Context):
         await ctx.defer()
         messages = await asyncio.to_thread(sports.la_liga_table)
         for message in messages:
             await ctx.send(message)
 
-    @client.hybrid_command(name="ucltable", description="Current Champions League standings or bracket")
-    async def ucltable(ctx: commands.Context):
+    @client.hybrid_command(name="ucl", description="Current Champions League standings or bracket")
+    async def ucl(ctx: commands.Context):
         await ctx.defer()
         messages = await asyncio.to_thread(sports.ucl_table)
         for message in messages:
