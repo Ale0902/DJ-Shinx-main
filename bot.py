@@ -42,6 +42,22 @@ RICH_PREVIEW_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+MAX_EMBED_DESC = 4096  # Discord's hard cap on an embed description
+
+
+def _with_question(question_line: str, body: str) -> str:
+    """Joins /chat's echoed question and its status/answer into a single
+    embed description, so the two show as one box instead of two separate
+    messages. Truncates the question (never the body) if the combination
+    would exceed Discord's embed description cap -- the body is what
+    actually matters; the question is just context above it."""
+    available = MAX_EMBED_DESC - len(body) - 2  # 2 for the blank line between them
+    if available <= 0:
+        return body
+    if len(question_line) > available:
+        question_line = question_line[:available - 1].rstrip() + "…"
+    return f"{question_line}\n\n{body}"
+
 
 def _embed(text: str) -> discord.Embed:
     """Wraps plain text in a cyan-bordered embed -- the standard shape for
@@ -326,8 +342,8 @@ def run_discord_bot():
     @client.hybrid_command(name="chat", description="Chat with DJ Shinx's AI brain")
     @discord.app_commands.describe(message="What do you want to say?")
     async def chat(ctx: commands.Context, *, message: str):
-        await ctx.send(embed=_embed(f"**From {ctx.author.display_name}:** {message}"))
-        thinking_message = await ctx.send(embed=_embed("🧠 Thinking..."))
+        question_line = f"**From {ctx.author.display_name}:** {message}"
+        thinking_message = await ctx.send(embed=_embed(_with_question(question_line, "🧠 Thinking...")))
         conversation_id = (ctx.channel.id, ctx.author.id)
 
         loop = asyncio.get_running_loop()
@@ -339,14 +355,17 @@ def run_discord_bot():
             notified['shown'] = True
             asyncio.run_coroutine_threadsafe(
                 thinking_message.edit(
-                    embed=_embed("⏳ Someone else is chatting with me right now -- you're queued, this might take a bit longer than usual...")
+                    embed=_embed(_with_question(
+                        question_line,
+                        "⏳ Someone else is chatting with me right now -- you're queued, this might take a bit longer than usual...",
+                    ))
                 ),
                 loop,
             )
 
         result = await asyncio.to_thread(llmask.ask, message, conversation_id, on_queued, ctx.author.id)
         chunks = llmask.chunk_response(result)
-        await thinking_message.edit(embed=_embed(chunks[0]))
+        await thinking_message.edit(embed=_embed(_with_question(question_line, chunks[0])))
         for chunk in chunks[1:]:
             await ctx.send(embed=_embed(chunk))
 
