@@ -21,7 +21,13 @@ option here.
 import os
 import re
 import sys
+import ast
+import math
+import operator
+import datetime
 import requests
+from urllib.parse import quote
+from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from mcp.server.mcpserver import MCPServer
@@ -35,6 +41,8 @@ USER_AGENT = "DJ-Shinx-Bot/1.0 (+https://github.com/Ale0902/DJ-Shinx-main)"
 MAX_FETCH_CHARS = 4000
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 SEARXNG_URL = os.getenv('SEARXNG_URL', 'http://127.0.0.1:8080')
+WIKIPEDIA_SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/{}"
+EASTERN = ZoneInfo("America/New_York")
 HTML_TAG_RE = re.compile(r"<[^<]+?>")
 
 
@@ -131,6 +139,93 @@ def fetch_page(url: str) -> str:
     if len(text) > MAX_FETCH_CHARS:
         text = text[:MAX_FETCH_CHARS] + "... [truncated]"
     return text
+
+
+@mcp.tool()
+def current_datetime() -> str:
+    """Returns the current real-world date and time (US Eastern). Use
+    this whenever you need to know what "today", "now", "recent", or
+    "current" actually means -- your training data has a fixed cutoff and
+    doesn't know how much time has passed since, which has caused you to
+    describe outdated things as current before."""
+    now = datetime.datetime.now(EASTERN)
+    return now.strftime("%A, %B %d, %Y, %I:%M %p ET").replace(" 0", " ")
+
+
+@mcp.tool()
+def wikipedia_summary(topic: str) -> str:
+    """Returns a short factual summary of the Wikipedia article for a
+    person, place, or thing, with its source link. Faster and more
+    reliable than web_search for straightforward "who/what is X"
+    questions. If the topic doesn't match an article title closely, this
+    may come back empty -- fall back to web_search in that case."""
+    try:
+        response = requests.get(
+            WIKIPEDIA_SUMMARY_URL.format(quote(topic.replace(' ', '_'))),
+            headers={"User-Agent": USER_AGENT},
+            timeout=10,
+        )
+        if response.status_code == 404:
+            return f"No Wikipedia article found for '{topic}'. Try web_search instead."
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        return f"Wikipedia lookup failed: {e}"
+
+    extract = data.get('extract', '')
+    if not extract:
+        return f"No summary available for '{topic}'. Try web_search instead."
+
+    url = data.get('content_urls', {}).get('desktop', {}).get('page', '')
+    return f"{extract}\n\nSource: {url}" if url else extract
+
+
+# A restricted arithmetic evaluator for the calculate() tool -- walks the
+# expression's AST and only permits numbers, basic operators, and a
+# whitelisted set of math functions/constants, rather than using eval()
+# (which would let an LLM-generated string run arbitrary Python).
+_BINOPS = {
+    ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+    ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod, ast.Pow: operator.pow,
+}
+_UNARYOPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
+_FUNCS = {
+    'abs': abs, 'round': round, 'min': min, 'max': max,
+    'sqrt': math.sqrt, 'sin': math.sin, 'cos': math.cos, 'tan': math.tan,
+    'log': math.log, 'log10': math.log10, 'exp': math.exp,
+    'floor': math.floor, 'ceil': math.ceil,
+}
+_CONSTANTS = {'pi': math.pi, 'e': math.e}
+
+
+def _safe_eval(node):
+    if isinstance(node, ast.Expression):
+        return _safe_eval(node.body)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op) in _BINOPS:
+        return _BINOPS[type(node.op)](_safe_eval(node.left), _safe_eval(node.right))
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARYOPS:
+        return _UNARYOPS[type(node.op)](_safe_eval(node.operand))
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _FUNCS:
+        return _FUNCS[node.func.id](*(_safe_eval(a) for a in node.args))
+    if isinstance(node, ast.Name) and node.id in _CONSTANTS:
+        return _CONSTANTS[node.id]
+    raise ValueError("unsupported expression")
+
+
+@mcp.tool()
+def calculate(expression: str) -> str:
+    """Evaluates a math expression (+, -, *, /, //, %, **, and functions
+    like sqrt/sin/cos/log/round) and returns the result. Use this for any
+    calculation instead of doing the arithmetic yourself -- you're
+    unreliable at multi-digit math."""
+    try:
+        result = _safe_eval(ast.parse(expression, mode='eval'))
+    except Exception as e:
+        return f"Couldn't evaluate '{expression}': {e}"
+    return str(result)
 
 
 if __name__ == "__main__":
