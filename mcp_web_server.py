@@ -8,13 +8,15 @@ stdout here -- it will corrupt the protocol. Anything printed goes to
 stderr instead, which is safe and flows through to journalctl since this
 is a child process of the bot's own systemd-managed process.
 
-Search tries the Brave Search API first (free tier: 2,000 queries/month,
-needs BRAVE_API_KEY in code.env), falling back to a self-hosted SearXNG
-instance (SEARXNG_URL, default http://127.0.0.1:8080) if Brave is
-unconfigured, rate-limited, or otherwise fails -- so search keeps working
-past Brave's monthly quota without needing a second paid API. DuckDuckGo's
-endpoints were tried first but actively block non-browser clients with a
-JS anomaly challenge, so they aren't a viable option here.
+Search tries a self-hosted SearXNG instance first (SEARXNG_URL, default
+http://127.0.0.1:8080) -- it's free, has no query quota, and already
+aggregates Brave/Google/Wikipedia results itself -- falling back to the
+Brave Search API directly (free tier: 2,000 queries/month, needs
+BRAVE_API_KEY in code.env) only if the SearXNG container is down or
+unreachable, so search still works if that container ever needs a
+restart. DuckDuckGo's endpoints were tried first but actively block
+non-browser clients with a JS anomaly challenge, so they aren't a viable
+option here.
 """
 import os
 import re
@@ -40,10 +42,32 @@ def _log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+def _searxng_search(query: str) -> list[dict] | None:
+    """Returns [{title, url, description}, ...] from the self-hosted
+    SearXNG instance, or None if it's unreachable (container down, not set
+    up, etc.) so the caller can fall back to the Brave API directly."""
+    try:
+        response = requests.get(
+            f'{SEARXNG_URL}/search',
+            params={'q': query, 'format': 'json'},
+            timeout=10,
+        )
+        response.raise_for_status()
+        results = response.json().get('results', [])
+    except Exception as e:
+        _log(f"web_search: SearXNG unreachable, falling back to Brave: {e}")
+        return None
+
+    return [
+        {'title': r.get('title', ''), 'url': r.get('url', ''), 'description': r.get('content', '')}
+        for r in results[:5]
+    ]
+
+
 def _brave_search(query: str) -> list[dict] | None:
-    """Returns [{title, url, description}, ...] from Brave, or None if
-    it's unconfigured or the request failed for any reason (missing key,
-    rate limited, network error) so the caller can fall back to SearXNG."""
+    """Returns [{title, url, description}, ...] from the Brave Search API
+    directly, or None if it's unconfigured or the request failed for any
+    reason (missing key, rate limited, network error)."""
     api_key = os.getenv('BRAVE_API_KEY')
     if not api_key:
         return None
@@ -58,7 +82,7 @@ def _brave_search(query: str) -> list[dict] | None:
         response.raise_for_status()
         results = response.json().get('web', {}).get('results', [])
     except Exception as e:
-        _log(f"web_search: Brave failed, falling back to SearXNG: {e}")
+        _log(f"web_search: Brave fallback also failed: {e}")
         return None
 
     return [
@@ -72,37 +96,16 @@ def _brave_search(query: str) -> list[dict] | None:
     ]
 
 
-def _searxng_search(query: str) -> list[dict] | None:
-    """Returns [{title, url, description}, ...] from a self-hosted SearXNG
-    instance, or None if it's unreachable (e.g. not set up)."""
-    try:
-        response = requests.get(
-            f'{SEARXNG_URL}/search',
-            params={'q': query, 'format': 'json'},
-            timeout=10,
-        )
-        response.raise_for_status()
-        results = response.json().get('results', [])
-    except Exception as e:
-        _log(f"web_search: SearXNG fallback also failed: {e}")
-        return None
-
-    return [
-        {'title': r.get('title', ''), 'url': r.get('url', ''), 'description': r.get('content', '')}
-        for r in results[:5]
-    ]
-
-
 @mcp.tool()
 def web_search(query: str) -> str:
     """Searches the web and returns the top results as title/url/snippet
     entries. Use this to look up current events, facts, or anything you're
     not confident about before answering."""
-    results = _brave_search(query)
+    results = _searxng_search(query)
     if results is None:
-        results = _searxng_search(query)
+        results = _brave_search(query)
     if results is None:
-        return "Web search is currently unavailable -- both Brave and the local SearXNG fallback failed."
+        return "Web search is currently unavailable -- both SearXNG and the Brave fallback failed."
     if not results:
         return "No results found."
 
