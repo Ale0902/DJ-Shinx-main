@@ -52,6 +52,7 @@ COMMAND_CATEGORIES = {
     '8ball': 'Fun',
     'mcstatus': 'Other',
     'ask': 'AI',
+    'forget': 'AI',
 }
 CATEGORY_ORDER = ['Sports', 'Music', 'Fun', 'AI', 'Other']
 
@@ -283,9 +284,16 @@ def run_discord_bot():
     @discord.app_commands.describe(question="What do you want to ask?")
     async def ask(ctx: commands.Context, *, question: str):
         await ctx.send(f"**Question from {ctx.author.display_name}:** {question}")
-        result = await asyncio.to_thread(llmask.ask, question)
+        conversation_id = (ctx.channel.id, ctx.author.id)
+        result = await asyncio.to_thread(llmask.ask, question, conversation_id)
         for chunk in llmask.chunk_response(result):
             await ctx.send(chunk)
+
+    @client.hybrid_command(name="forget", description="Clears your conversation history with DJ Shinx's AI brain")
+    async def forget(ctx: commands.Context):
+        conversation_id = (ctx.channel.id, ctx.author.id)
+        await asyncio.to_thread(llmask.forget, conversation_id)
+        await ctx.send("Alright, clean slate — I've forgotten our conversation so far.")
 
     @client.hybrid_command(name="help", description="Lists every command DJ Shinx offers")
     async def help_command(ctx: commands.Context):

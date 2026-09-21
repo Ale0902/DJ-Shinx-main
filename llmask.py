@@ -1,8 +1,10 @@
 import os
 import sys
 import re
+import time
 import logging
 import asyncio
+import threading
 import requests
 
 from mcp import ClientSession, StdioServerParameters
@@ -22,6 +24,43 @@ OLLAMA_TIMEOUT = 120
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 MCP_SERVER_SCRIPT = os.path.join(BASE, 'mcp_web_server.py')
+
+# In-memory conversation history, keyed by whatever the caller passes as a
+# conversation_id (bot.py uses (channel_id, user_id), so each person's
+# conversation in a given channel is independent). Only holds the visible
+# question/answer pairs -- not each turn's internal TOOL_CALL/tool-result
+# scaffolding, so it doesn't balloon with raw search dumps. Cleared on bot
+# restart; that's fine, this is meant to feel like a chat session, not a
+# permanent record.
+CONVERSATION_TTL_SECONDS = 20 * 60  # idle this long and the next /ask starts fresh
+MAX_HISTORY_TURNS = 8  # question/answer pairs kept; oldest dropped first
+
+_conversations: dict = {}
+_conversations_lock = threading.Lock()
+
+
+def _get_history(conversation_id) -> list[dict]:
+    with _conversations_lock:
+        entry = _conversations.get(conversation_id)
+        if not entry:
+            return []
+        last_used, history = entry
+        if time.monotonic() - last_used > CONVERSATION_TTL_SECONDS:
+            del _conversations[conversation_id]
+            return []
+        return list(history)
+
+
+def _save_history(conversation_id, history: list[dict]) -> None:
+    trimmed = history[-(MAX_HISTORY_TURNS * 2):]
+    with _conversations_lock:
+        _conversations[conversation_id] = (time.monotonic(), trimmed)
+
+
+def forget(conversation_id) -> None:
+    """Clears a conversation's history -- backs the /forget command."""
+    with _conversations_lock:
+        _conversations.pop(conversation_id, None)
 
 # Ollama's native `tools` API (structured tool_calls) isn't supported by every
 # model's chat template -- e.g. gemma3 rejects a request outright (400) if
@@ -85,20 +124,28 @@ def _build_system_prompt(mcp_tools) -> tuple[str, dict[str, str]]:
         "what happened in an incident) that you aren't certain of -- never "
         "guess or invent specific details. If a search doesn't turn up a "
         "clear answer, say so honestly instead of making something up.\n\n"
-        "Once you've looked something up, summarize it in your own words -- "
-        "never paste raw search results, links, or page text back verbatim. "
-        "Give a short, direct final answer as plain text with no prefix, and "
-        "don't mention that you used any tools."
+        "For questions that need real research rather than a quick fact, "
+        "search first, then use fetch_page on the most relevant result to "
+        "read the full page before answering -- don't settle for just the "
+        "search snippet.\n\n"
+        "Summarize what you found in your own words, not pasted verbatim, "
+        "but end your answer with the source URL on its own line, like "
+        "'Source: <url>', so it can be checked. Keep the rest of the answer "
+        "short and direct, as plain text with no prefix, and don't mention "
+        "that you used any tools."
     )
     return system_prompt, tool_param
 
 
-async def _ask_with_tools(question: str, ollama_url: str, ollama_model: str) -> str:
+async def _ask_with_tools(question: str, history: list[dict], ollama_url: str, ollama_model: str) -> str:
     """Runs the question through Ollama, prompting it to request the MCP
     server's tools (web_search, fetch_page) by name before it settles on a
-    final answer. Spawns mcp_web_server.py fresh as a stdio subprocess for
-    the duration of this call -- simplest option given /ask's traffic
-    doesn't need a persistent connection."""
+    final answer. `history` is the prior visible question/answer pairs from
+    this conversation, if any -- spliced in between the system prompt and
+    the new question so the model has context for follow-ups. Spawns
+    mcp_web_server.py fresh as a stdio subprocess for the duration of this
+    call -- simplest option given /ask's traffic doesn't need a persistent
+    connection."""
     server_params = StdioServerParameters(command=sys.executable, args=[MCP_SERVER_SCRIPT])
 
     async with stdio_client(server_params) as (read, write):
@@ -110,6 +157,7 @@ async def _ask_with_tools(question: str, ollama_url: str, ollama_model: str) -> 
 
             messages = [
                 {'role': 'system', 'content': system_prompt},
+                *history,
                 {'role': 'user', 'content': question},
             ]
 
@@ -148,15 +196,28 @@ async def _ask_with_tools(question: str, ollama_url: str, ollama_model: str) -> 
             return "I looked into that but couldn't settle on a final answer in time -- try asking again."
 
 
-def ask(question: str) -> str:
+def ask(question: str, conversation_id=None) -> str:
     """Sends a question to the Ollama LLM, letting it call the web_search
     and fetch_page tools (served by mcp_web_server.py) when it needs
-    current information, and returns its final reply as a string."""
+    current information, and returns its final reply as a string.
+
+    conversation_id, if given, is an opaque hashable key (bot.py uses
+    (channel_id, user_id)) used to remember prior question/answer pairs so
+    follow-up questions have context -- pass None for a one-off question
+    with no memory."""
     ollama_url = os.getenv('OLLAMA_URL', 'http://localhost:11434')
     ollama_model = os.getenv('OLLAMA_MODEL', 'gemma3:4b')
+    history = _get_history(conversation_id) if conversation_id is not None else []
     try:
-        answer = asyncio.run(_ask_with_tools(question, ollama_url, ollama_model))
-        return answer or "DJ Shinx's brain came back empty. Try rephrasing that."
+        answer = asyncio.run(_ask_with_tools(question, history, ollama_url, ollama_model))
+        answer = answer or "DJ Shinx's brain came back empty. Try rephrasing that."
+        if conversation_id is not None:
+            updated = history + [
+                {'role': 'user', 'content': question},
+                {'role': 'assistant', 'content': answer},
+            ]
+            _save_history(conversation_id, updated)
+        return answer
     except requests.exceptions.ConnectionError:
         return "Couldn't reach the LLM — is Ollama running on the VM and reachable from here?"
     except requests.exceptions.Timeout:
