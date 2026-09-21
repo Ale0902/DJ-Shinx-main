@@ -244,25 +244,34 @@ def _fetch_nfl_standings() -> dict:
     return _get_json(NFL_STANDINGS_URL, params={'level': 3})
 
 
-def _nfl_team_line(entry: dict) -> str:
+def _nfl_team_row(entry: dict, tag: str = '') -> str:
     team = entry['team'].get('shortDisplayName') or entry['team']['displayName']
     record = _nfl_stat(entry, 'overall') or '-'
-    streak = _nfl_stat(entry, 'streak')
-    return f"{team} — {record} ({streak})" if streak else f"{team} — {record}"
+    streak = _nfl_stat(entry, 'streak') or '-'
+    return f"{team:<18.18} {record:<8} {streak:<4}{tag}"
 
 
 def _nfl_division_page(standings_data: dict) -> str:
+    """One compact aligned table per conference (all its divisions
+    together) instead of a separate blank-line-separated block per
+    division -- fits the same info in noticeably less vertical space."""
     lines = ["## NFL Standings by Division"]
     for conference in standings_data.get('children', []):
+        rows = [f"{'Team':<18} {'Record':<8} Streak"]
         for division in conference.get('children', []):
             entries = division.get('standings', {}).get('entries', [])
             entries.sort(key=lambda e: float(_nfl_stat(e, 'winPercent') or 0), reverse=True)
-            lines.append(f"\n**{division['name']}**")
-            lines.extend(_nfl_team_line(entry) for entry in entries)
+            rows.append(f"-- {division['name']} --")
+            rows.extend(_nfl_team_row(entry) for entry in entries)
+        body = "\n".join(rows)
+        lines.append(f"**{conference['name']}**\n```\n{body}\n```")
     return "\n".join(lines)
 
 
 def _nfl_playoff_page(standings_data: dict) -> str:
+    """One compact table per conference: seed, team, record, streak, with
+    a short tag marking wild card and in-the-hunt spots inline instead of
+    separate section headers for each group."""
     lines = ["## NFL Playoff Picture"]
     for conference in standings_data.get('children', []):
         entries = [
@@ -272,19 +281,14 @@ def _nfl_playoff_page(standings_data: dict) -> str:
         ]
         entries.sort(key=lambda e: int(_nfl_stat(e, 'playoffSeed') or 99))
 
-        division_leaders = entries[:4]
-        wild_card = entries[4:NFL_PLAYOFF_SPOTS]
-        in_the_hunt = entries[NFL_PLAYOFF_SPOTS:NFL_PLAYOFF_SPOTS + NFL_HUNT_SIZE]
+        shown = entries[:NFL_PLAYOFF_SPOTS + NFL_HUNT_SIZE]
+        rows = [f"{'#':<3}{'Team':<18} {'Record':<8} Streak"]
+        for i, entry in enumerate(shown, start=1):
+            tag = '' if i <= 4 else '  (WC)' if i <= NFL_PLAYOFF_SPOTS else '  (hunt)'
+            rows.append(f"{i:<3}{_nfl_team_row(entry, tag)}")
 
-        lines.append(f"\n**{conference['name']}**")
-        lines.append("Division Leaders:")
-        lines.extend(f"  {i}. {_nfl_team_line(e)}" for i, e in enumerate(division_leaders, start=1))
-        lines.append("Wild Card:")
-        lines.extend(f"  {i}. {_nfl_team_line(e)}" for i, e in enumerate(wild_card, start=5))
-        if in_the_hunt:
-            lines.append("In the Hunt:")
-            lines.extend(f"  {_nfl_team_line(e)}" for e in in_the_hunt)
-
+        body = "\n".join(rows)
+        lines.append(f"**{conference['name']}**\n```\n{body}\n```")
     return "\n".join(lines)
 
 
