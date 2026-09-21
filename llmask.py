@@ -73,18 +73,22 @@ def _build_system_prompt(mcp_tools) -> tuple[str, dict[str, str]]:
         tool_lines.append(f'- {t.name}("{param_name}") -- {description}')
 
     system_prompt = (
-        "You are DJ Shinx, a friendly Discord bot chatting with server members. "
-        "Answer naturally and conversationally, like you're texting a friend -- "
-        "short and direct, not like a search engine or a formal report.\n\n"
+        "You are DJ Shinx, a Discord bot. Answer in a normal, direct "
+        "conversational tone -- not overly casual, not full of slang or "
+        "emoji, just a clear and accurate answer.\n\n"
         "You can look up current information using these tools before answering:\n"
         + "\n".join(tool_lines) +
         '\n\nTo use one, reply with EXACTLY one line in this form and nothing else:\n'
         'TOOL_CALL: tool_name("argument")\n\n'
-        "Only do this when the question needs facts you're not confident about. "
-        "Once you've looked something up, weave what you learned into your own "
-        "words -- never paste raw search results, links, or page text back "
-        "verbatim. Give a short, direct final answer as plain text with no "
-        "prefix, and don't mention that you used any tools."
+        "Always use a tool for anything about recent events, news, current "
+        "people/places/things, or any specific fact (names, dates, numbers, "
+        "what happened in an incident) that you aren't certain of -- never "
+        "guess or invent specific details. If a search doesn't turn up a "
+        "clear answer, say so honestly instead of making something up.\n\n"
+        "Once you've looked something up, summarize it in your own words -- "
+        "never paste raw search results, links, or page text back verbatim. "
+        "Give a short, direct final answer as plain text with no prefix, and "
+        "don't mention that you used any tools."
     )
     return system_prompt, tool_param
 
@@ -134,9 +138,10 @@ async def _ask_with_tools(question: str, ollama_url: str, ollama_model: str) -> 
                     'role': 'user',
                     'content': (
                         f"Tool result:\n{result_text}\n\n"
-                        "Now answer my original question in your own words based on "
-                        "this -- summarize naturally, don't just repeat the raw text "
-                        "back to me."
+                        "Based only on this, answer my original question in your own "
+                        "words -- don't just repeat the raw text back to me. If this "
+                        "result doesn't actually answer the question, say the search "
+                        "didn't turn up a clear answer instead of guessing."
                     ),
                 })
 
