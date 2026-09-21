@@ -119,6 +119,33 @@ def _strip_citation(content: str) -> str:
     return SOURCE_LINE_RE.sub('', content).rstrip()
 
 
+# Phrases indicating the model itself doesn't trust its own answer (usually
+# surfacing when challenged, e.g. "cite your source") -- a signal to retry
+# with a fresh, better-targeted search instead of just accepting "I was
+# wrong" / "I can't confirm this" as final.
+SELF_CORRECTION_RE = re.compile(
+    r"\b(i apologi[sz]e|inaccurate|unable to confirm|i'?m not sure|"
+    r"i don'?t have (a |any )?(reliable |real )?source|i made a mistake|"
+    r"that (was|is) (incorrect|wrong)|i cannot confirm|i can'?t verify|"
+    r"i don'?t actually know)\b",
+    re.IGNORECASE,
+)
+
+
+def _pick_retry_query(question: str, history: list[dict]) -> str:
+    """Picks what to actually re-search on a self-correction retry. If
+    this turn's message is itself just a meta request like "cite your
+    source", that text makes a useless search query -- fall back to the
+    last real question in history instead, so the retry searches for the
+    League of Legends match, not for "cite your source"."""
+    if not _wants_source(question):
+        return question
+    for msg in reversed(history):
+        if msg.get('role') == 'user':
+            return msg.get('content') or question
+    return question
+
+
 def _ollama_chat(messages: list[dict], ollama_url: str, ollama_model: str) -> dict:
     response = requests.post(
         f'{ollama_url}/api/chat',
@@ -249,12 +276,43 @@ async def _ask_with_tools(
                 },
             ]
 
+            retried = False
+            retry_query = _pick_retry_query(question, history)
+
             for _ in range(MAX_TOOL_ITERATIONS):
                 data = _ollama_chat(messages, ollama_url, ollama_model)
                 content = (data.get('message', {}).get('content') or '').strip()
 
                 match = TOOL_CALL_RE.search(content)
                 if not match:
+                    if not retried and SELF_CORRECTION_RE.search(content):
+                        # The model itself doesn't trust this answer -- try
+                        # once more with a fresh, better-targeted search
+                        # instead of just accepting "I was wrong" as final.
+                        retried = True
+                        try:
+                            retry_result = await session.call_tool('web_search', {'query': retry_query})
+                            retry_text = "\n".join(
+                                part.text for part in retry_result.content if hasattr(part, 'text')
+                            )
+                        except Exception as e:
+                            retry_text = f"Search failed: {e}"
+                        seen_urls |= _extract_urls(retry_text)
+
+                        messages.append({'role': 'assistant', 'content': content})
+                        messages.append({
+                            'role': 'user',
+                            'content': (
+                                f"You weren't confident in that answer. Here are fresh "
+                                f"search results for '{retry_query}':\n{retry_text}\n\n"
+                                "Try again using these. If they give a clear answer, use "
+                                "it; if they still don't, it's fine to honestly say you "
+                                "couldn't find a reliable answer -- just don't repeat the "
+                                "same unconfirmed claim."
+                            ),
+                        })
+                        continue
+
                     return _verify_citation(content, seen_urls), seen_urls
 
                 messages.append({'role': 'assistant', 'content': content})
