@@ -9,6 +9,7 @@ discord==2.3.2
 discord.py==2.3.2
 frozenlist==1.4.0
 idna==3.4
+mcp==2.2.0
 mcstatus==11.1.1
 multidict==6.0.4
 python-dotenv==1.0.0
