@@ -110,15 +110,17 @@ def web_search(query: str) -> str:
     entries. Use this to look up current events, facts, or anything you're
     not confident about before answering."""
     results = _searxng_search(query)
+    source = "the local SearXNG instance"
     if results is None:
         results = _brave_search(query)
+        source = "the Brave Search API (SearXNG was unreachable)"
     if results is None:
         return "Web search is currently unavailable -- both SearXNG and the Brave fallback failed."
     if not results:
-        return "No results found."
+        return f"No results found via {source}."
 
     lines = [f"{r['title']}\n{r['url']}\n{r['description']}" for r in results]
-    return "\n\n".join(lines)
+    return f"[Results via {source}]\n\n" + "\n\n".join(lines)
 
 
 @mcp.tool()
