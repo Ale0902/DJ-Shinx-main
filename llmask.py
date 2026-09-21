@@ -123,9 +123,13 @@ def _verify_citation(content: str, seen_urls: set[str]) -> str:
 # citation only gets displayed when actually requested rather than tacked
 # onto every reply -- checked against the current message only, since a
 # fresh request each turn naturally covers both asking up front and asking
-# as a separate follow-up.
+# as a separate follow-up. Also covers asking for a specific piece of media
+# (a video, an image, a page/article) -- those are implicitly asking for a
+# link too, since there's no way to watch/view one without a URL.
 SOURCE_REQUEST_RE = re.compile(
-    r'\b(source|sources|link|links|url|urls|cite|citation|reference|proof|prove it)\b',
+    r'\b(source|sources|link|links|url|urls|cite|citation|reference|proof|prove it|'
+    r'video|videos|youtube|watch|picture|pictures|image|images|photo|photos|'
+    r'website|webpage|web page|page|article|articles|tweet|post|clip|stream)\b',
     re.IGNORECASE,
 )
 
