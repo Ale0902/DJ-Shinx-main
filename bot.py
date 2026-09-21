@@ -20,6 +20,17 @@ logger = logging.getLogger(__name__)
 
 EASTERN = ZoneInfo("America/New_York")
 
+# Exact cyan, used as every embed's left-hand accent color for a consistent look.
+EMBED_COLOR = discord.Color.from_rgb(0, 255, 255)
+
+
+def _embed(text: str) -> discord.Embed:
+    """Wraps plain text in a cyan-bordered embed -- the standard shape for
+    every bot response. Existing sports.py/llmask.py output is already
+    sized for Discord's 2000-char plain-message limit, well under an
+    embed description's 4096-char cap, so no re-chunking is needed."""
+    return discord.Embed(description=text, color=EMBED_COLOR)
+
 # Commands that work normally but are left out of /help entirely -- easter
 # eggs that only show up if you already know about them.
 HIDDEN_COMMANDS = {'vini'}
@@ -86,9 +97,11 @@ class PaginatorView(discord.ui.View):
         self.previous_button.disabled = self.index == 0
         self.next_button.disabled = self.index == len(self.pages) - 1
 
-    def content(self):
+    def embed(self) -> discord.Embed:
         title, body = self.pages[self.index]
-        return f"{body}\n\n*Page {self.index + 1}/{len(self.pages)} — {title}*"
+        e = _embed(body)
+        e.set_footer(text=f"Page {self.index + 1}/{len(self.pages)} — {title}")
+        return e
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -102,13 +115,13 @@ class PaginatorView(discord.ui.View):
     async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.index -= 1
         self._update_buttons()
-        await interaction.response.edit_message(content=self.content(), view=self)
+        await interaction.response.edit_message(embed=self.embed(), view=self)
 
     @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.index += 1
         self._update_buttons()
-        await interaction.response.edit_message(content=self.content(), view=self)
+        await interaction.response.edit_message(embed=self.embed(), view=self)
 
     async def on_timeout(self):
         for item in self.children:
@@ -131,91 +144,94 @@ def run_discord_bot():
 
     @client.hybrid_command(name="hello", description="Says hello")
     async def hello(ctx: commands.Context):
-        await ctx.send("Hello!")
+        await ctx.send(embed=_embed("Hello!"))
 
     @client.hybrid_command(name="recsong", description="Recommends a random song from the server's list")
     async def recsong(ctx: commands.Context):
         await ctx.defer()
         result = await asyncio.to_thread(bf.recsongs)
-        await ctx.send(result)
+        await ctx.send(embed=_embed(result))
 
     @client.hybrid_command(name="top5songs", description="Top 5 songs on iTunes charts!")
     async def top5(ctx: commands.Context):
         await ctx.defer()
         result = await asyncio.to_thread(bf.topsongs)
-        await ctx.send(result)
+        await ctx.send(embed=_embed(result))
 
     @client.hybrid_command(name='rolld6', description='Rolls a D6 dice')
     async def rolld6(ctx: commands.Context):
-        await ctx.send(responses.rolld6())
+        await ctx.send(embed=_embed(responses.rolld6()))
 
     @client.hybrid_command(name='rolld20', description='Rolls a D20 dice')
     async def rolld20(ctx: commands.Context):
-        await ctx.send(responses.rolld20())
+        await ctx.send(embed=_embed(responses.rolld20()))
 
     @client.hybrid_command(name='ping', description='pingpong')
     async def ping(ctx: commands.Context):
-        await ctx.send(responses.ping())
+        await ctx.send(embed=_embed(responses.ping()))
 
     @client.hybrid_command(name="coin_flip", description="Flip a coin!")
     async def coinflip(ctx: commands.Context):
-        await ctx.send(responses.coinflip())
+        await ctx.send(embed=_embed(responses.coinflip()))
 
     @client.hybrid_command(name="vini", description="Posts a Vini Jr tweet")
     async def vini(ctx: commands.Context):
+        # Deliberately plain text, not an embed -- Discord only auto-unfurls
+        # a link into its own rich preview when it's raw message content,
+        # not when it's tucked inside an embed description.
         await ctx.send("https://x.com/vinijr/status/1851023004496789695?s=20")
 
     @client.hybrid_command(name="8ball", description="Shakes an eight ball")
     @discord.app_commands.describe(question="What do you want to ask the eight ball?")
     async def eightball(ctx: commands.Context, *, question: str = None):
         if question:
-            await ctx.send(f"**From {ctx.author.display_name}:** {question}")
-        await ctx.send(bf.eightball())
+            await ctx.send(embed=_embed(f"**From {ctx.author.display_name}:** {question}"))
+        await ctx.send(embed=_embed(bf.eightball()))
 
     @client.hybrid_command(name="nfl", description="This week's NFL games and live scores")
     async def nfl(ctx: commands.Context):
         await ctx.defer()
         messages = await asyncio.to_thread(sports.nfl_synopsis)
         for message in messages:
-            await ctx.send(message)
+            await ctx.send(embed=_embed(message))
 
     @client.hybrid_command(name="nfllive", description="Only NFL games currently in progress")
     async def nfllive(ctx: commands.Context):
         await ctx.defer()
         messages = await asyncio.to_thread(sports.nfl_live_matches)
         for message in messages:
-            await ctx.send(message)
+            await ctx.send(embed=_embed(message))
 
     @client.hybrid_command(name="nflresults", description="This week's finished NFL games and final scores")
     async def nflresults(ctx: commands.Context):
         await ctx.defer()
         messages = await asyncio.to_thread(sports.nfl_results_this_week)
         for message in messages:
-            await ctx.send(message)
+            await ctx.send(embed=_embed(message))
 
     @client.hybrid_command(name="cfb", description="This week's ranked college football games, with a South Florida spotlight")
     async def cfb(ctx: commands.Context):
         await ctx.defer()
         messages = await asyncio.to_thread(sports.cfb_synopsis)
         for message in messages:
-            await ctx.send(message)
+            await ctx.send(embed=_embed(message))
 
     @client.hybrid_command(name="mlb", description="This week's MLB series and their records")
     async def mlb(ctx: commands.Context):
         await ctx.defer()
         messages = await asyncio.to_thread(sports.mlb_series_synopsis)
         for message in messages:
-            await ctx.send(message)
+            await ctx.send(embed=_embed(message))
 
     @client.hybrid_command(name="soccer", description="This week's matches, one page per competition")
     async def soccer(ctx: commands.Context):
         await ctx.defer()
         pages = await asyncio.to_thread(sports.soccer_pages)
         if not pages:
-            await ctx.send("No matches scheduled in any tracked competition this week.")
+            await ctx.send(embed=_embed("No matches scheduled in any tracked competition this week."))
             return
         view = PaginatorView(pages, author_id=ctx.author.id, command_name="soccer")
-        message = await ctx.send(view.content(), view=view)
+        message = await ctx.send(embed=view.embed(), view=view)
         view.message = message
 
     @client.hybrid_command(name="nflstandings", description="NFL standings by division, and the current playoff picture")
@@ -223,7 +239,7 @@ def run_discord_bot():
         await ctx.defer()
         pages = await asyncio.to_thread(sports.nfl_standings_pages)
         view = PaginatorView(pages, author_id=ctx.author.id, command_name="nflstandings")
-        message = await ctx.send(view.content(), view=view)
+        message = await ctx.send(embed=view.embed(), view=view)
         view.message = message
 
     @client.hybrid_command(name="livesoccer", description="Only soccer matches currently in progress")
@@ -231,60 +247,60 @@ def run_discord_bot():
         await ctx.defer()
         messages = await asyncio.to_thread(sports.live_soccer_matches)
         for message in messages:
-            await ctx.send(message)
+            await ctx.send(embed=_embed(message))
 
     @client.hybrid_command(name="soccerresults", description="Today's finished soccer matches and final scores")
     async def soccerresults(ctx: commands.Context):
         await ctx.defer()
         messages = await asyncio.to_thread(sports.soccer_results_today)
         for message in messages:
-            await ctx.send(message)
+            await ctx.send(embed=_embed(message))
 
     @client.hybrid_command(name="prem", description="Current Premier League standings")
     async def prem(ctx: commands.Context):
         await ctx.defer()
         messages = await asyncio.to_thread(sports.premier_league_table)
         for message in messages:
-            await ctx.send(message)
+            await ctx.send(embed=_embed(message))
 
     @client.hybrid_command(name="laliga", description="Current La Liga standings")
     async def laliga(ctx: commands.Context):
         await ctx.defer()
         messages = await asyncio.to_thread(sports.la_liga_table)
         for message in messages:
-            await ctx.send(message)
+            await ctx.send(embed=_embed(message))
 
     @client.hybrid_command(name="ucl", description="Current Champions League standings or bracket")
     async def ucl(ctx: commands.Context):
         await ctx.defer()
         messages = await asyncio.to_thread(sports.ucl_table)
         for message in messages:
-            await ctx.send(message)
+            await ctx.send(embed=_embed(message))
 
     @client.hybrid_command(name="f1", description="Is it F1 race weekend right now?")
     async def f1cmd(ctx: commands.Context):
         await ctx.defer()
         result = await asyncio.to_thread(f1.f1_status)
-        await ctx.send(result)
+        await ctx.send(embed=_embed(result))
 
     @client.hybrid_command(name="f1standings", description="Current F1 drivers' and constructors' championship standings")
     async def f1standings(ctx: commands.Context):
         await ctx.defer()
         messages = await asyncio.to_thread(f1.f1_standings)
         for message in messages:
-            await ctx.send(message)
+            await ctx.send(embed=_embed(message))
 
     @client.hybrid_command(name="mcstatus", description="Check the Minecraft server status")
     async def mcstatus(ctx: commands.Context):
         await ctx.defer()
         result = await asyncio.to_thread(bf.mc_status)
-        await ctx.send(result)
+        await ctx.send(embed=_embed(result))
 
     @client.hybrid_command(name="chat", description="Chat with DJ Shinx's AI brain")
     @discord.app_commands.describe(message="What do you want to say?")
     async def chat(ctx: commands.Context, *, message: str):
-        await ctx.send(f"**From {ctx.author.display_name}:** {message}")
-        thinking_message = await ctx.send("🧠 Thinking...")
+        await ctx.send(embed=_embed(f"**From {ctx.author.display_name}:** {message}"))
+        thinking_message = await ctx.send(embed=_embed("🧠 Thinking..."))
         conversation_id = (ctx.channel.id, ctx.author.id)
 
         loop = asyncio.get_running_loop()
@@ -296,22 +312,22 @@ def run_discord_bot():
             notified['shown'] = True
             asyncio.run_coroutine_threadsafe(
                 thinking_message.edit(
-                    content="⏳ Someone else is chatting with me right now -- you're queued, this might take a bit longer than usual..."
+                    embed=_embed("⏳ Someone else is chatting with me right now -- you're queued, this might take a bit longer than usual...")
                 ),
                 loop,
             )
 
         result = await asyncio.to_thread(llmask.ask, message, conversation_id, on_queued)
         chunks = llmask.chunk_response(result)
-        await thinking_message.edit(content=chunks[0])
+        await thinking_message.edit(embed=_embed(chunks[0]))
         for chunk in chunks[1:]:
-            await ctx.send(chunk)
+            await ctx.send(embed=_embed(chunk))
 
     @client.hybrid_command(name="forget", description="Clears your conversation history with DJ Shinx's AI brain")
     async def forget(ctx: commands.Context):
         conversation_id = (ctx.channel.id, ctx.author.id)
         await asyncio.to_thread(llmask.forget, conversation_id)
-        await ctx.send("Alright, clean slate — I've forgotten our conversation so far.")
+        await ctx.send(embed=_embed("Alright, clean slate — I've forgotten our conversation so far."))
 
     @client.hybrid_command(name="help", description="Lists every command DJ Shinx offers")
     async def help_command(ctx: commands.Context):
@@ -331,7 +347,7 @@ def run_discord_bot():
             pages.append((category, "\n".join(lines)))
 
         view = PaginatorView(pages, author_id=ctx.author.id, command_name="help")
-        message = await ctx.send(view.content(), view=view)
+        message = await ctx.send(embed=view.embed(), view=view)
         view.message = message
 
  #=========================--END COMMANDS--===================================#
@@ -340,7 +356,7 @@ def run_discord_bot():
     async def sotd():
         channel = client.get_channel(1023430299335532615)
         result = await asyncio.to_thread(bf.recsongs)
-        await channel.send(result)
+        await channel.send(embed=_embed(result))
 
     @tasks.loop(hours=6.0)
     async def new_chapter_announcements():
@@ -350,11 +366,11 @@ def run_discord_bot():
 
         berserk_announcement = await asyncio.to_thread(bf.check_berserk_release)
         if berserk_announcement:
-            await channel.send(berserk_announcement)
+            await channel.send(embed=_embed(berserk_announcement))
 
         batman_announcement = await asyncio.to_thread(bf.check_absolute_batman_release)
         if batman_announcement:
-            await channel.send(batman_announcement)
+            await channel.send(embed=_embed(batman_announcement))
 
     @tasks.loop(minutes=15.0)
     async def f1_updates():
@@ -364,7 +380,7 @@ def run_discord_bot():
 
         messages = await asyncio.to_thread(f1.check_f1_updates)
         for message in messages:
-            await channel.send(message)
+            await channel.send(embed=_embed(message))
 
     @client.event
     async def on_ready():
