@@ -115,34 +115,38 @@ def _build_system_prompt(mcp_tools) -> tuple[str, dict[str, str]]:
         "You are DJ Shinx, a Discord bot. Answer in a normal, direct "
         "conversational tone -- not overly casual, not full of slang or "
         "emoji, just a clear and accurate answer.\n\n"
-        "You can look up current information using these tools before answering:\n"
+        "Every question comes with fresh web search results attached below "
+        "it. Use them to ground any factual claim -- names, dates, "
+        "rankings, recent events, anything you aren't 100% certain of. If "
+        "they're irrelevant (e.g. the question is just casual conversation, "
+        "or something you're already completely certain about), ignore "
+        "them and answer normally.\n\n"
+        "If those results aren't enough -- you need to read a specific "
+        "page in full, or search again with different terms -- you can use "
+        "these tools:\n"
         + "\n".join(tool_lines) +
         '\n\nTo use one, reply with EXACTLY one line in this form and nothing else:\n'
         'TOOL_CALL: tool_name("argument")\n\n'
-        "Always use a tool for anything about recent events, news, current "
-        "people/places/things, or any specific fact (names, dates, numbers, "
-        "what happened in an incident) that you aren't certain of -- never "
-        "guess or invent specific details. If a search doesn't turn up a "
-        "clear answer, say so honestly instead of making something up.\n\n"
-        "For questions that need real research rather than a quick fact, "
-        "search first, then use fetch_page on the most relevant result to "
-        "read the full page before answering -- don't settle for just the "
-        "search snippet.\n\n"
+        "Never guess or invent specific facts, names, dates, or sources -- "
+        "if you don't actually have information to support a claim, say so "
+        "honestly instead of making something up, including if asked for a "
+        "source you don't have.\n\n"
         "Summarize what you found in your own words, not pasted verbatim, "
-        "but end your answer with the source URL on its own line, like "
-        "'Source: <url>', so it can be checked. Keep the rest of the answer "
-        "short and direct, as plain text with no prefix, and don't mention "
-        "that you used any tools."
+        "and end with the source URL on its own line, like 'Source: <url>', "
+        "when you used one. Keep the rest of the answer short and direct, "
+        "as plain text with no prefix, and don't mention that you searched."
     )
     return system_prompt, tool_param
 
 
 async def _ask_with_tools(question: str, history: list[dict], ollama_url: str, ollama_model: str) -> str:
-    """Runs the question through Ollama, prompting it to request the MCP
-    server's tools (web_search, fetch_page) by name before it settles on a
-    final answer. `history` is the prior visible question/answer pairs from
-    this conversation, if any -- spliced in between the system prompt and
-    the new question so the model has context for follow-ups. Spawns
+    """Runs the question through Ollama, always searching the web first
+    rather than leaving that decision to the model -- a small model's
+    judgment about whether it needs to search is unreliable (it tends to
+    confidently answer wrong instead of admitting it doesn't know). The
+    model can still call web_search/fetch_page itself afterward if the
+    initial results aren't enough. `history` is the prior visible
+    question/answer pairs from this conversation, if any. Spawns
     mcp_web_server.py fresh as a stdio subprocess for the duration of this
     call -- simplest option given /ask's traffic doesn't need a persistent
     connection."""
@@ -155,10 +159,25 @@ async def _ask_with_tools(question: str, history: list[dict], ollama_url: str, o
             mcp_tools = (await session.list_tools()).tools
             system_prompt, tool_param = _build_system_prompt(mcp_tools)
 
+            try:
+                search_result = await session.call_tool('web_search', {'query': question})
+                search_text = "\n".join(part.text for part in search_result.content if hasattr(part, 'text'))
+            except Exception as e:
+                search_text = f"Search failed: {e}"
+
             messages = [
                 {'role': 'system', 'content': system_prompt},
                 *history,
                 {'role': 'user', 'content': question},
+                {
+                    'role': 'user',
+                    'content': (
+                        f"Web search results for the question above:\n{search_text}\n\n"
+                        "Answer using these if they're relevant. If they're not "
+                        "relevant (e.g. this is just casual conversation), ignore "
+                        "them and answer normally."
+                    ),
+                },
             ]
 
             for _ in range(MAX_TOOL_ITERATIONS):
