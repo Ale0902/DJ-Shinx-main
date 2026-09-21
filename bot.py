@@ -51,7 +51,7 @@ COMMAND_CATEGORIES = {
     'coin_flip': 'Fun',
     '8ball': 'Fun',
     'mcstatus': 'Other',
-    'ask': 'AI',
+    'chat': 'AI',
     'forget': 'AI',
 }
 CATEGORY_ORDER = ['Sports', 'Music', 'Fun', 'AI', 'Other']
@@ -280,13 +280,13 @@ def run_discord_bot():
         result = await asyncio.to_thread(bf.mc_status)
         await ctx.send(result)
 
-    @client.hybrid_command(name="ask", description="Ask DJ Shinx's AI brain a question")
-    @discord.app_commands.describe(question="What do you want to ask?")
-    async def ask(ctx: commands.Context, *, question: str):
-        await ctx.send(f"**From {ctx.author.display_name}:** {question}")
+    @client.hybrid_command(name="chat", description="Chat with DJ Shinx's AI brain")
+    @discord.app_commands.describe(message="What do you want to say?")
+    async def chat(ctx: commands.Context, *, message: str):
+        await ctx.send(f"**From {ctx.author.display_name}:** {message}")
         thinking_message = await ctx.send("🧠 Thinking...")
         conversation_id = (ctx.channel.id, ctx.author.id)
-        result = await asyncio.to_thread(llmask.ask, question, conversation_id)
+        result = await asyncio.to_thread(llmask.ask, message, conversation_id)
         chunks = llmask.chunk_response(result)
         await thinking_message.edit(content=chunks[0])
         for chunk in chunks[1:]:
