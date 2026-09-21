@@ -125,8 +125,9 @@ def web_search(query: str) -> str:
 
 @mcp.tool()
 def fetch_page(url: str) -> str:
-    """Fetches a web page (e.g. one returned by web_search) and returns
-    its readable text content, truncated to a few thousand characters."""
+    """Fetches a web page, such as one returned by web_search, and
+    returns its readable text content, truncated to a few thousand
+    characters."""
     try:
         response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
         response.raise_for_status()

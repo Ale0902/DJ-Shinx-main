@@ -87,6 +87,13 @@ def _extract_urls(text: str) -> set[str]:
     return {u.rstrip('.,)') for u in URL_RE.findall(text)}
 
 
+def _normalize_url(url: str) -> str:
+    """Strips scheme and a leading 'www.' and trailing slash, so citation
+    matching isn't tripped up by http vs https or a trailing slash on an
+    otherwise-identical URL."""
+    return re.sub(r'^https?://(www\.)?', '', url.strip()).rstrip('/')
+
+
 def _verify_citation(content: str, seen_urls: set[str]) -> str:
     """Strips the model's "Source: <url>" line if that URL never actually
     came back from a tool call this turn (or an earlier turn in the same
@@ -96,8 +103,12 @@ def _verify_citation(content: str, seen_urls: set[str]) -> str:
     if not match:
         return content
 
-    cited = match.group(1).rstrip('.,)/')
-    if any(cited in url or url in cited for url in seen_urls):
+    cited = _normalize_url(match.group(1).rstrip('.,)/'))
+    normalized_seen = {_normalize_url(u) for u in seen_urls}
+    # Exact match after normalization, or a same-page variant (query string
+    # dropped, etc.) -- but require enough shared length that two merely
+    # similar paths on the same site can't false-positive off each other.
+    if any(cited == u or (len(cited) > 12 and (cited in u or u in cited)) for u in normalized_seen):
         return content
 
     stripped = SOURCE_LINE_RE.sub('', content).rstrip()
@@ -200,6 +211,20 @@ def _describe_exception(e: BaseException) -> str:
     return f"{type(e).__name__}: {e}"
 
 
+def _tool_description(tool) -> str:
+    """The tool's docstring, trimmed to its first complete sentence --
+    NOT just its first source-code *line*, which used to cut every one of
+    these off mid-thought (e.g. wikipedia_summary's became "Returns a
+    short factual summary of the Wikipedia article for a") since the
+    docstrings are hand-wrapped at ~79 chars, not written one sentence
+    per line."""
+    if not tool.description:
+        return ''
+    joined = ' '.join(line.strip() for line in tool.description.strip().splitlines())
+    first_sentence = joined.split('. ')[0]
+    return first_sentence.rstrip('.') + '.'
+
+
 def _build_system_prompt(mcp_tools) -> tuple[str, dict[str, str]]:
     """Returns (system_prompt, {tool_name: its single string param name}).
     Both of the MCP server's tools (web_search, fetch_page) take exactly
@@ -211,25 +236,29 @@ def _build_system_prompt(mcp_tools) -> tuple[str, dict[str, str]]:
         props = (t.input_schema or {}).get('properties', {})
         param_name = next(iter(props), 'value')
         tool_param[t.name] = param_name
-        description = (t.description or '').strip().splitlines()[0] if t.description else ''
-        tool_lines.append(f'- {t.name}("{param_name}") -- {description}')
+        tool_lines.append(f'- {t.name}("{param_name}") -- {_tool_description(t)}')
 
     system_prompt = (
-        "You are Agent Shinx, a Discord bot. Answer in a normal, direct "
-        "conversational tone -- not overly casual, not full of slang or "
-        "emoji, just a clear and accurate answer.\n\n"
-        "You can look up information using these tools:\n"
+        "You are Agent Shinx, a Discord bot that works like a quick search "
+        "engine: give a short, direct summary that answers the question -- "
+        "1-3 sentences for most questions, more only if it genuinely needs "
+        "detail. Plain, direct tone -- not overly casual, not full of "
+        "slang or emoji.\n\n"
+        "Every question already comes with fresh web search results "
+        "attached below it -- that search already ran automatically, you "
+        "don't need to decide whether to do it. Use those results to "
+        "ground any factual claim -- names, dates, rankings, recent "
+        "events, anything you aren't 100% certain of. If they're "
+        "irrelevant (e.g. the question is just casual conversation, or "
+        "something you're already completely certain about), ignore them "
+        "and answer normally.\n\n"
+        "If those results aren't enough, you can call one of these tools "
+        "yourself for a follow-up -- e.g. read a specific page in full, "
+        "search again with different terms, or look something up more "
+        "precisely:\n"
         + "\n".join(tool_lines) +
         '\n\nTo use one, reply with EXACTLY one line in this form and nothing else:\n'
         'TOOL_CALL: tool_name("argument")\n\n'
-        "Use a tool whenever the question is about current events, news, "
-        "or anything that changes over time (scores, prices, schedules, "
-        "who currently holds a role or record) -- your training data has a "
-        "cutoff, so don't rely on it for anything that could be outdated. "
-        "Also use one for any specific fact (names, dates, numbers, what "
-        "happened in an incident) you aren't fully certain of. For general "
-        "knowledge you're confident and certain about, answer directly "
-        "without searching.\n\n"
         "Never guess or invent specific facts, names, dates, or sources -- "
         "if you don't actually have information to support a claim, say so "
         "honestly instead of making something up, including if asked for a "
@@ -243,9 +272,8 @@ def _build_system_prompt(mcp_tools) -> tuple[str, dict[str, str]]:
         "and end with the source URL on its own line, like 'Source: <url>', "
         "when you used one. Before you finish, check that your answer "
         "actually matches the source you're citing -- if it doesn't, you've "
-        "made a mistake and should fix it or say you're not sure. Keep the "
-        "rest of the answer short and direct, as plain text with no prefix, "
-        "and don't mention that you searched."
+        "made a mistake and should fix it or say you're not sure. Plain "
+        "text, no prefix, and don't mention that you searched."
     )
     return system_prompt, tool_param
 
