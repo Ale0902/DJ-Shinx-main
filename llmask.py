@@ -134,6 +134,25 @@ def _strip_citation(content: str) -> str:
     return SOURCE_LINE_RE.sub('', content).rstrip()
 
 
+# Whether the user explicitly asked for a complete enumeration ("name all
+# the...", "list every...") -- the brevity instruction ("1-3 sentences")
+# otherwise leads the model to substitute a short summary (e.g. "there are
+# 89 characters") for the actual list that was asked for. Detected per-turn
+# and used to swap in a different instruction, rather than trusting the
+# model to correctly balance two competing instructions in one static
+# prompt -- that's failed for other soft, judgment-based instructions
+# enough times this session to not lean on it here either.
+LIST_REQUEST_RE = re.compile(
+    r'\b(list all|name all|list every|name every|all of the|every single|'
+    r'complete list|full list|enumerate)\b',
+    re.IGNORECASE,
+)
+
+
+def _wants_full_list(question: str) -> bool:
+    return bool(LIST_REQUEST_RE.search(question))
+
+
 # Phrases indicating the model itself doesn't trust its own answer (usually
 # surfacing when challenged, e.g. "cite your source") -- a signal to retry
 # with a fresh, better-targeted search instead of just accepting "I was
@@ -225,7 +244,7 @@ def _tool_description(tool) -> str:
     return first_sentence.rstrip('.') + '.'
 
 
-def _build_system_prompt(mcp_tools) -> tuple[str, dict[str, str]]:
+def _build_system_prompt(mcp_tools, wants_full_list: bool = False) -> tuple[str, dict[str, str]]:
     """Returns (system_prompt, {tool_name: its single string param name}).
     Both of the MCP server's tools (web_search, fetch_page) take exactly
     one string argument, so the param name is read straight off each
@@ -238,12 +257,24 @@ def _build_system_prompt(mcp_tools) -> tuple[str, dict[str, str]]:
         tool_param[t.name] = param_name
         tool_lines.append(f'- {t.name}("{param_name}") -- {_tool_description(t)}')
 
+    if wants_full_list:
+        brevity_instruction = (
+            "The user explicitly asked you to list/name/enumerate everything "
+            "of some kind -- give the actual complete list they asked for, "
+            "not a short summary or just a count. Length isn't capped for "
+            "this one."
+        )
+    else:
+        brevity_instruction = (
+            "Give a short, direct summary that answers the question -- 1-3 "
+            "sentences for most questions, more only if it genuinely needs "
+            "detail."
+        )
+
     system_prompt = (
-        "You are Agent Shinx, a Discord bot that works like a quick search "
-        "engine: give a short, direct summary that answers the question -- "
-        "1-3 sentences for most questions, more only if it genuinely needs "
-        "detail. Plain, direct tone -- not overly casual, not full of "
-        "slang or emoji.\n\n"
+        f"You are Agent Shinx, a Discord bot that works like a quick search "
+        f"engine. {brevity_instruction} Plain, direct tone -- not overly "
+        f"casual, not full of slang or emoji.\n\n"
         "Every question already comes with fresh web search results "
         "attached below it -- that search already ran automatically, you "
         "don't need to decide whether to do it. Use those results to "
@@ -303,7 +334,7 @@ async def _ask_with_tools(
             await session.initialize()
 
             mcp_tools = (await session.list_tools()).tools
-            system_prompt, tool_param = _build_system_prompt(mcp_tools)
+            system_prompt, tool_param = _build_system_prompt(mcp_tools, _wants_full_list(question))
 
             seen_urls: set[str] = set(prior_urls)
 
