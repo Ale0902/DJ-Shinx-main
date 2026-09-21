@@ -284,9 +284,12 @@ def run_discord_bot():
     @discord.app_commands.describe(question="What do you want to ask?")
     async def ask(ctx: commands.Context, *, question: str):
         await ctx.send(f"**Question from {ctx.author.display_name}:** {question}")
+        thinking_message = await ctx.send("🧠 Thinking...")
         conversation_id = (ctx.channel.id, ctx.author.id)
         result = await asyncio.to_thread(llmask.ask, question, conversation_id)
-        for chunk in llmask.chunk_response(result):
+        chunks = llmask.chunk_response(result)
+        await thinking_message.edit(content=chunks[0])
+        for chunk in chunks[1:]:
             await ctx.send(chunk)
 
     @client.hybrid_command(name="forget", description="Clears your conversation history with DJ Shinx's AI brain")
