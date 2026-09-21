@@ -20,7 +20,11 @@ MAX_DISCORD_LEN = 2000
 # page, then answer" exchange takes 2-3, so this caps worst-case latency
 # without cutting off legitimate multi-step lookups.
 MAX_TOOL_ITERATIONS = 4
-OLLAMA_TIMEOUT = 120
+# A single Ollama call can legitimately take a while on a 12B model split
+# across modest GPUs, especially with a lot of context (conversation
+# history + search results) or a longer response to generate -- 120s was
+# too tight and cut off an otherwise-successful generation.
+OLLAMA_TIMEOUT = 180
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 MCP_SERVER_SCRIPT = os.path.join(BASE, 'mcp_web_server.py')
