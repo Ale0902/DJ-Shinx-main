@@ -73,13 +73,18 @@ def _build_system_prompt(mcp_tools) -> tuple[str, dict[str, str]]:
         tool_lines.append(f'- {t.name}("{param_name}") -- {description}')
 
     system_prompt = (
+        "You are DJ Shinx, a friendly Discord bot chatting with server members. "
+        "Answer naturally and conversationally, like you're texting a friend -- "
+        "short and direct, not like a search engine or a formal report.\n\n"
         "You can look up current information using these tools before answering:\n"
         + "\n".join(tool_lines) +
         '\n\nTo use one, reply with EXACTLY one line in this form and nothing else:\n'
         'TOOL_CALL: tool_name("argument")\n\n'
         "Only do this when the question needs facts you're not confident about. "
-        "Once you have enough information, give your final answer as plain text "
-        "-- no prefix, and don't mention the tools themselves."
+        "Once you've looked something up, weave what you learned into your own "
+        "words -- never paste raw search results, links, or page text back "
+        "verbatim. Give a short, direct final answer as plain text with no "
+        "prefix, and don't mention that you used any tools."
     )
     return system_prompt, tool_param
 
@@ -125,7 +130,15 @@ async def _ask_with_tools(question: str, ollama_url: str, ollama_model: str) -> 
                     except Exception as e:
                         result_text = f"Tool {name} failed: {e}"
 
-                messages.append({'role': 'user', 'content': f"Tool result:\n{result_text}"})
+                messages.append({
+                    'role': 'user',
+                    'content': (
+                        f"Tool result:\n{result_text}\n\n"
+                        "Now answer my original question in your own words based on "
+                        "this -- summarize naturally, don't just repeat the raw text "
+                        "back to me."
+                    ),
+                })
 
             return "I looked into that but couldn't settle on a final answer in time -- try asking again."
 
