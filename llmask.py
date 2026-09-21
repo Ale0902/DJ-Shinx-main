@@ -131,10 +131,18 @@ def _build_system_prompt(mcp_tools) -> tuple[str, dict[str, str]]:
         "if you don't actually have information to support a claim, say so "
         "honestly instead of making something up, including if asked for a "
         "source you don't have.\n\n"
+        "When a tool result conflicts with what you think you know, trust "
+        "the tool result, not your memory -- this matters especially for "
+        "people, teams, or things with common or ambiguous names, where "
+        "you might be thinking of a different one. Don't blend facts about "
+        "a different person/thing with a similar name into your answer.\n\n"
         "Summarize what you found in your own words, not pasted verbatim, "
         "and end with the source URL on its own line, like 'Source: <url>', "
-        "when you used one. Keep the rest of the answer short and direct, "
-        "as plain text with no prefix, and don't mention that you searched."
+        "when you used one. Before you finish, check that your answer "
+        "actually matches the source you're citing -- if it doesn't, you've "
+        "made a mistake and should fix it or say you're not sure. Keep the "
+        "rest of the answer short and direct, as plain text with no prefix, "
+        "and don't mention that you searched."
     )
     return system_prompt, tool_param
 
@@ -190,10 +198,15 @@ async def _ask_with_tools(question: str, history: list[dict], ollama_url: str, o
                     'role': 'user',
                     'content': (
                         f"Tool result:\n{result_text}\n\n"
-                        "Based only on this, answer my original question in your own "
-                        "words -- don't just repeat the raw text back to me. If this "
-                        "result doesn't actually answer the question, say the search "
-                        "didn't turn up a clear answer instead of guessing."
+                        "Answer my original question using ONLY what this result "
+                        "actually says -- if it conflicts with anything you thought "
+                        "you knew, the result is correct, not your memory, and don't "
+                        "blend in facts about a different person/thing with a "
+                        "similar name. Summarize in your own words, don't repeat the "
+                        "raw text back to me, and double check your answer doesn't "
+                        "contradict this result before you finish. If this result "
+                        "doesn't actually answer the question, say the search didn't "
+                        "turn up a clear answer instead of guessing."
                     ),
                 })
 
