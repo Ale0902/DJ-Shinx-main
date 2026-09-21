@@ -169,7 +169,7 @@ def run_discord_bot():
     @discord.app_commands.describe(question="What do you want to ask the eight ball?")
     async def eightball(ctx: commands.Context, *, question: str = None):
         if question:
-            await ctx.send(f"**Question from {ctx.author.display_name}:** {question}")
+            await ctx.send(f"**From {ctx.author.display_name}:** {question}")
         await ctx.send(bf.eightball())
 
     @client.hybrid_command(name="nfl", description="This week's NFL games and live scores")
@@ -283,7 +283,7 @@ def run_discord_bot():
     @client.hybrid_command(name="ask", description="Ask DJ Shinx's AI brain a question")
     @discord.app_commands.describe(question="What do you want to ask?")
     async def ask(ctx: commands.Context, *, question: str):
-        await ctx.send(f"**Question from {ctx.author.display_name}:** {question}")
+        await ctx.send(f"**From {ctx.author.display_name}:** {question}")
         thinking_message = await ctx.send("🧠 Thinking...")
         conversation_id = (ctx.channel.id, ctx.author.id)
         result = await asyncio.to_thread(llmask.ask, question, conversation_id)
