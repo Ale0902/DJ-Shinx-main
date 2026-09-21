@@ -150,12 +150,24 @@ def _pick_retry_query(question: str, history: list[dict]) -> str:
     return question
 
 
+# Serializes actual Ollama requests across concurrent /chat calls. The VM's
+# two GPUs are already snug on VRAM for one gemma3:12b generation (~5.5GB of
+# ~10GB combined) -- letting two users' requests hit Ollama at once doesn't
+# give real parallelism, it just makes both generations slower and more
+# likely to blow past OLLAMA_TIMEOUT (which only covers one request's own
+# wait, not queueing behind someone else's). Serializing means the second
+# user's request predictably waits its turn instead of both potentially
+# timing out.
+_ollama_lock = threading.Lock()
+
+
 def _ollama_chat(messages: list[dict], ollama_url: str, ollama_model: str) -> dict:
-    response = requests.post(
-        f'{ollama_url}/api/chat',
-        json={'model': ollama_model, 'messages': messages, 'stream': False},
-        timeout=OLLAMA_TIMEOUT,
-    )
+    with _ollama_lock:
+        response = requests.post(
+            f'{ollama_url}/api/chat',
+            json={'model': ollama_model, 'messages': messages, 'stream': False},
+            timeout=OLLAMA_TIMEOUT,
+        )
     if not response.ok:
         # Ollama's error responses are {"error": "<reason>"} -- surface that
         # instead of requests' generic "400 Client Error" (no body detail).
