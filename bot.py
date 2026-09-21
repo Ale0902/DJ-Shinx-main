@@ -286,7 +286,22 @@ def run_discord_bot():
         await ctx.send(f"**From {ctx.author.display_name}:** {message}")
         thinking_message = await ctx.send("🧠 Thinking...")
         conversation_id = (ctx.channel.id, ctx.author.id)
-        result = await asyncio.to_thread(llmask.ask, message, conversation_id)
+
+        loop = asyncio.get_running_loop()
+        notified = {'shown': False}
+
+        def on_queued():
+            if notified['shown']:
+                return
+            notified['shown'] = True
+            asyncio.run_coroutine_threadsafe(
+                thinking_message.edit(
+                    content="⏳ Someone else is chatting with me right now -- you're queued, this might take a bit longer than usual..."
+                ),
+                loop,
+            )
+
+        result = await asyncio.to_thread(llmask.ask, message, conversation_id, on_queued)
         chunks = llmask.chunk_response(result)
         await thinking_message.edit(content=chunks[0])
         for chunk in chunks[1:]:

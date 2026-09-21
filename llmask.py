@@ -161,13 +161,24 @@ def _pick_retry_query(question: str, history: list[dict]) -> str:
 _ollama_lock = threading.Lock()
 
 
-def _ollama_chat(messages: list[dict], ollama_url: str, ollama_model: str) -> dict:
-    with _ollama_lock:
+def _ollama_chat(messages: list[dict], ollama_url: str, ollama_model: str, on_queued=None) -> dict:
+    """on_queued(), if given, is called at most once if this call has to
+    wait for another in-flight request to finish first -- lets the caller
+    tell the user they're queued instead of leaving them sat waiting with
+    no explanation."""
+    if not _ollama_lock.acquire(blocking=False):
+        if on_queued:
+            on_queued()
+        _ollama_lock.acquire()  # now block until it's actually our turn
+
+    try:
         response = requests.post(
             f'{ollama_url}/api/chat',
             json={'model': ollama_model, 'messages': messages, 'stream': False},
             timeout=OLLAMA_TIMEOUT,
         )
+    finally:
+        _ollama_lock.release()
     if not response.ok:
         # Ollama's error responses are {"error": "<reason>"} -- surface that
         # instead of requests' generic "400 Client Error" (no body detail).
@@ -240,7 +251,7 @@ def _build_system_prompt(mcp_tools) -> tuple[str, dict[str, str]]:
 
 
 async def _ask_with_tools(
-    question: str, history: list[dict], prior_urls: set[str], ollama_url: str, ollama_model: str
+    question: str, history: list[dict], prior_urls: set[str], ollama_url: str, ollama_model: str, on_queued=None
 ) -> tuple[str, set[str]]:
     """Runs the question through Ollama, always searching the web first
     rather than leaving that decision to the model -- model-judgment
@@ -296,7 +307,7 @@ async def _ask_with_tools(
             retry_query = _pick_retry_query(question, history)
 
             for _ in range(MAX_TOOL_ITERATIONS):
-                data = _ollama_chat(messages, ollama_url, ollama_model)
+                data = _ollama_chat(messages, ollama_url, ollama_model, on_queued)
                 content = (data.get('message', {}).get('content') or '').strip()
 
                 match = TOOL_CALL_RE.search(content)
@@ -366,7 +377,7 @@ async def _ask_with_tools(
             return "I looked into that but couldn't settle on a final answer in time -- try asking again.", seen_urls
 
 
-def ask(question: str, conversation_id=None) -> str:
+def ask(question: str, conversation_id=None, on_queued=None) -> str:
     """Sends a question to the Ollama LLM, letting it call the web_search
     and fetch_page tools (served by mcp_web_server.py) when it needs
     current information, and returns its final reply as a string.
@@ -381,12 +392,18 @@ def ask(question: str, conversation_id=None) -> str:
     conversation_id, if given, is an opaque hashable key (bot.py uses
     (channel_id, user_id)) used to remember prior question/answer pairs
     (and every source URL seen along the way) so follow-up questions have
-    context -- pass None for a one-off question with no memory."""
+    context -- pass None for a one-off question with no memory.
+
+    on_queued, if given, is called (from this function's own thread) if
+    another /chat call is already talking to Ollama, so the caller can let
+    the user know they're waiting in line instead of just sitting there."""
     ollama_url = os.getenv('OLLAMA_URL', 'http://localhost:11434')
     ollama_model = os.getenv('OLLAMA_MODEL', 'gemma3:4b')
     history, prior_urls = _get_conversation(conversation_id) if conversation_id is not None else ([], set())
     try:
-        full_answer, seen_urls = asyncio.run(_ask_with_tools(question, history, prior_urls, ollama_url, ollama_model))
+        full_answer, seen_urls = asyncio.run(
+            _ask_with_tools(question, history, prior_urls, ollama_url, ollama_model, on_queued)
+        )
         full_answer = full_answer or "DJ Shinx's brain came back empty. Try rephrasing that."
         displayed_answer = full_answer if _wants_source(question) else _strip_citation(full_answer)
         if conversation_id is not None:
