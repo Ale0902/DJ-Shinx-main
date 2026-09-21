@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 
 # Point this at the Ollama server via OLLAMA_URL/OLLAMA_MODEL in code.env.
 # Read lazily (not at import time) since bot.py loads code.env after importing this module.
-MAX_DISCORD_LEN = 2000
+# bot.py wraps every reply in an embed, whose description allows up to 4096
+# chars -- comfortably more room than a plain message's 2000-char cap.
+MAX_DISCORD_LEN = 4000
 
 # Each iteration is one Ollama round-trip; a typical "search, maybe fetch a
 # page, then answer" exchange takes 2-3, so this caps worst-case latency

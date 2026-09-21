@@ -98,7 +98,7 @@ def _flag_label(competitor: dict) -> str:
     flag = COUNTRY_FLAGS.get(name)
     return f"{flag} {name}" if flag else name
 
-SOCCER_PAGE_LIMIT = 1900  # leaves headroom under Discord's 2000-char cap
+SOCCER_PAGE_LIMIT = 4000  # leaves headroom under an embed description's 4096-char cap
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -564,7 +564,7 @@ def mlb_series_synopsis() -> list[str]:
     return _chunk_ansi_block("## This Week's MLB Series!", [line for _, line in lines])
 
 
-def _chunk_ansi_block(header: str, lines: list[str], limit: int = 1900) -> list[str]:
+def _chunk_ansi_block(header: str, lines: list[str], limit: int = SOCCER_PAGE_LIMIT) -> list[str]:
     """Packs `lines` (each possibly containing its own embedded newlines,
     e.g. a live match's goal list) into one or more Discord messages, each
     wrapping its slice in its own fenced ```ansi block with its own header
@@ -874,13 +874,13 @@ def _format_standings_table(
     entries: list[dict],
     color_fn: Callable[[int, int], str | None] | None = None,
     live_status: dict[str, str] | None = None,
-    limit: int = 1900,
+    limit: int = SOCCER_PAGE_LIMIT,
 ) -> list[str]:
     """Returns a list of Discord-ready message chunks for the standings
-    table. A big table (e.g. UCL's 36-team league phase) can exceed
-    Discord's 2000-char limit, so rows are split across multiple messages
-    -- each with its own header and closed code fence -- rather than
-    letting a naive character-count split cut a fenced block in half.
+    table. A big table (e.g. UCL's 36-team league phase) can exceed an
+    embed description's 4096-char limit, so rows are split across multiple
+    messages -- each with its own header and closed code fence -- rather
+    than letting a naive character-count split cut a fenced block in half.
 
     color_fn(rank, total) -> an ANSI color code (or None) lets callers
     highlight zones like relegation spots or UCL qualification cutoffs.
