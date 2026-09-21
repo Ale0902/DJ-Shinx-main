@@ -1,11 +1,14 @@
 import os
 import sys
 import json
+import logging
 import asyncio
 import requests
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+logger = logging.getLogger(__name__)
 
 # Point this at the Ollama server via OLLAMA_URL/OLLAMA_MODEL in code.env.
 # Read lazily (not at import time) since bot.py loads code.env after importing this module.
@@ -45,6 +48,16 @@ def _parse_tool_args(raw_args) -> dict:
         except json.JSONDecodeError:
             return {}
     return raw_args or {}
+
+
+def _describe_exception(e: BaseException) -> str:
+    """Unwraps ExceptionGroups -- anyio's TaskGroup (used internally by the
+    MCP client) wraps whatever actually failed in one, and printing the
+    group itself just says "unhandled errors in a TaskGroup" with no
+    detail. This digs out the real underlying error(s) instead."""
+    if isinstance(e, BaseExceptionGroup):
+        return "; ".join(_describe_exception(sub) for sub in e.exceptions)
+    return f"{type(e).__name__}: {e}"
 
 
 async def _ask_with_tools(question: str, ollama_url: str, ollama_model: str) -> str:
@@ -114,9 +127,12 @@ def ask(question: str) -> str:
     except requests.exceptions.Timeout:
         return "The LLM took too long to respond. Try a shorter question."
     except requests.exceptions.RequestException as e:
+        logger.warning(f"ask() request failed: {e}")
         return f"Something went wrong talking to the LLM: {e}"
     except Exception as e:
-        return f"Something went wrong talking to the LLM: {e}"
+        detail = _describe_exception(e)
+        logger.warning(f"ask() failed: {detail}")
+        return f"Something went wrong talking to the LLM: {detail}"
 
 
 def chunk_response(text: str, size: int = MAX_DISCORD_LEN):
