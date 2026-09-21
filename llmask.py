@@ -37,7 +37,14 @@ def _ollama_chat(messages: list[dict], tools: list[dict], ollama_url: str, ollam
         json={'model': ollama_model, 'messages': messages, 'tools': tools, 'stream': False},
         timeout=OLLAMA_TIMEOUT,
     )
-    response.raise_for_status()
+    if not response.ok:
+        # Ollama's error responses are {"error": "<reason>"} -- surface that
+        # instead of requests' generic "400 Client Error" (no body detail).
+        try:
+            detail = response.json().get('error', response.text)
+        except ValueError:
+            detail = response.text
+        raise requests.exceptions.HTTPError(f"Ollama returned {response.status_code}: {detail}")
     return response.json()
 
 
