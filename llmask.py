@@ -321,7 +321,11 @@ def _build_system_prompt(
         "when you used one. Before you finish, check that your answer "
         "actually matches the source you're citing -- if it doesn't, you've "
         "made a mistake and should fix it or say you're not sure. Plain "
-        "text, no prefix, and don't mention that you searched."
+        "text, no prefix, and don't mention that you searched.\n\n"
+        "If asked for a picture, photo, image, or video of something, use "
+        "image_search (not web_search) and put the exact image_url it "
+        "returns as your 'Source: <url>' line, copied exactly, not "
+        "paraphrased or shortened -- that's what actually gets displayed."
     )
     return system_prompt, tool_param
 

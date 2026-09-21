@@ -123,6 +123,77 @@ def web_search(query: str) -> str:
     return f"[Results via {source}]\n\n" + "\n\n".join(lines)
 
 
+def _searxng_image_search(query: str) -> list[dict] | None:
+    """Returns [{title, url, image_url}, ...] from the self-hosted SearXNG
+    instance's image category, or None if it's unreachable."""
+    try:
+        response = requests.get(
+            f'{SEARXNG_URL}/search',
+            params={'q': query, 'format': 'json', 'categories': 'images'},
+            timeout=10,
+        )
+        response.raise_for_status()
+        results = response.json().get('results', [])
+    except Exception as e:
+        _log(f"image_search: SearXNG unreachable, falling back to Brave: {e}")
+        return None
+
+    return [
+        {'title': r.get('title', ''), 'url': r.get('url', ''), 'image_url': r.get('img_src', '')}
+        for r in results
+        if r.get('img_src')
+    ][:5]
+
+
+def _brave_image_search(query: str) -> list[dict] | None:
+    """Returns [{title, url, image_url}, ...] from the Brave Image Search
+    API directly, or None if it's unconfigured or the request failed."""
+    api_key = os.getenv('BRAVE_API_KEY')
+    if not api_key:
+        return None
+
+    try:
+        response = requests.get(
+            "https://api.search.brave.com/res/v1/images/search",
+            params={'q': query, 'count': 5},
+            headers={'Accept': 'application/json', 'X-Subscription-Token': api_key},
+            timeout=10,
+        )
+        response.raise_for_status()
+        results = response.json().get('results', [])
+    except Exception as e:
+        _log(f"image_search: Brave fallback also failed: {e}")
+        return None
+
+    return [
+        {
+            'title': r.get('title', ''),
+            'url': r.get('url', ''),
+            'image_url': (r.get('properties') or {}).get('url', ''),
+        }
+        for r in results
+        if (r.get('properties') or {}).get('url')
+    ][:5]
+
+
+@mcp.tool()
+def image_search(query: str) -> str:
+    """Searches for images matching a description and returns direct
+    image links (not just pages that mention the topic). Use this,
+    instead of web_search, when asked for a picture, photo, image, or
+    video thumbnail of something."""
+    results = _searxng_image_search(query)
+    source = "the local SearXNG instance"
+    if not results:
+        results = _brave_image_search(query)
+        source = "the Brave Image Search API (SearXNG had no image results)"
+    if not results:
+        return "No images found for that."
+
+    lines = [f"{r['title']}\nImage: {r['image_url']}\nPage: {r['url']}" for r in results]
+    return f"[Image results via {source}]\n\n" + "\n\n".join(lines)
+
+
 @mcp.tool()
 def fetch_page(url: str) -> str:
     """Fetches a web page, such as one returned by web_search, and

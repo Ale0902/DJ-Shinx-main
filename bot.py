@@ -3,6 +3,7 @@ from discord.ext import commands, tasks
 import asyncio
 import datetime
 import logging
+import re
 from zoneinfo import ZoneInfo
 import responses
 import botFunctions as bf
@@ -24,13 +25,25 @@ EASTERN = ZoneInfo("America/New_York")
 # Exact cyan, used as every embed's left-hand accent color for a consistent look.
 EMBED_COLOR = discord.Color.from_rgb(0, 255, 255)
 
+# Matches a direct link to an image file (as opposed to a page that merely
+# contains one) -- used to display /chat's image_search results inline in
+# the embed itself rather than just as a clickable text link.
+IMAGE_URL_RE = re.compile(r'https?://\S+\.(?:jpg|jpeg|png|gif|webp)\b', re.IGNORECASE)
+
 
 def _embed(text: str) -> discord.Embed:
     """Wraps plain text in a cyan-bordered embed -- the standard shape for
     every bot response. Existing sports.py/llmask.py output is already
     sized for Discord's 2000-char plain-message limit, well under an
-    embed description's 4096-char cap, so no re-chunking is needed."""
-    return discord.Embed(description=text, color=EMBED_COLOR)
+    embed description's 4096-char cap, so no re-chunking is needed.
+    If the text contains a direct image URL (e.g. /chat citing an
+    image_search result), it's shown as an actual picture inside the
+    embed instead of just a plain link."""
+    e = discord.Embed(description=text, color=EMBED_COLOR)
+    image_match = IMAGE_URL_RE.search(text)
+    if image_match:
+        e.set_image(url=image_match.group(0))
+    return e
 
 # Commands that work normally but are left out of /help entirely -- easter
 # eggs that only show up if you already know about them.
