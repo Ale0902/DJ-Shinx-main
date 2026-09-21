@@ -9,7 +9,7 @@ MAX_DISCORD_LEN = 2000
 def ask(question: str) -> str:
     """Sends a question to the Ollama LLM and returns its reply as a string."""
     ollama_url = os.getenv('OLLAMA_URL', 'http://localhost:11434')
-    ollama_model = os.getenv('OLLAMA_MODEL', 'llama3')
+    ollama_model = os.getenv('OLLAMA_MODEL', 'gemma3:4b')
     try:
         response = requests.post(
             f'{ollama_url}/api/generate',
