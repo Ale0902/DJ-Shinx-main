@@ -1,6 +1,6 @@
 import os
 import sys
-import json
+import re
 import logging
 import asyncio
 import requests
@@ -23,18 +23,18 @@ OLLAMA_TIMEOUT = 120
 BASE = os.path.dirname(os.path.abspath(__file__))
 MCP_SERVER_SCRIPT = os.path.join(BASE, 'mcp_web_server.py')
 
-SYSTEM_PROMPT = (
-    "You can call the web_search and fetch_page tools to look up current "
-    "information before answering. Use them when the question needs facts "
-    "you're not confident about, then give a clear, direct final answer -- "
-    "don't mention the tools themselves in your reply."
-)
+# Ollama's native `tools` API (structured tool_calls) isn't supported by every
+# model's chat template -- e.g. gemma3 rejects a request outright (400) if
+# `tools` is even present. This prompts the model to request a tool by
+# writing a specific line of text instead, which works with any chat model
+# regardless of native tool-calling support.
+TOOL_CALL_RE = re.compile(r'TOOL_CALL:\s*(\w+)\(\s*["\']([^"\']*)["\']\s*\)')
 
 
-def _ollama_chat(messages: list[dict], tools: list[dict], ollama_url: str, ollama_model: str) -> dict:
+def _ollama_chat(messages: list[dict], ollama_url: str, ollama_model: str) -> dict:
     response = requests.post(
         f'{ollama_url}/api/chat',
-        json={'model': ollama_model, 'messages': messages, 'tools': tools, 'stream': False},
+        json={'model': ollama_model, 'messages': messages, 'stream': False},
         timeout=OLLAMA_TIMEOUT,
     )
     if not response.ok:
@@ -48,15 +48,6 @@ def _ollama_chat(messages: list[dict], tools: list[dict], ollama_url: str, ollam
     return response.json()
 
 
-def _parse_tool_args(raw_args) -> dict:
-    if isinstance(raw_args, str):
-        try:
-            return json.loads(raw_args)
-        except json.JSONDecodeError:
-            return {}
-    return raw_args or {}
-
-
 def _describe_exception(e: BaseException) -> str:
     """Unwraps ExceptionGroups -- anyio's TaskGroup (used internally by the
     MCP client) wraps whatever actually failed in one, and printing the
@@ -67,12 +58,38 @@ def _describe_exception(e: BaseException) -> str:
     return f"{type(e).__name__}: {e}"
 
 
+def _build_system_prompt(mcp_tools) -> tuple[str, dict[str, str]]:
+    """Returns (system_prompt, {tool_name: its single string param name}).
+    Both of the MCP server's tools (web_search, fetch_page) take exactly
+    one string argument, so the param name is read straight off each
+    tool's JSON schema instead of being hardcoded here."""
+    tool_param = {}
+    tool_lines = []
+    for t in mcp_tools:
+        props = (t.input_schema or {}).get('properties', {})
+        param_name = next(iter(props), 'value')
+        tool_param[t.name] = param_name
+        description = (t.description or '').strip().splitlines()[0] if t.description else ''
+        tool_lines.append(f'- {t.name}("{param_name}") -- {description}')
+
+    system_prompt = (
+        "You can look up current information using these tools before answering:\n"
+        + "\n".join(tool_lines) +
+        '\n\nTo use one, reply with EXACTLY one line in this form and nothing else:\n'
+        'TOOL_CALL: tool_name("argument")\n\n'
+        "Only do this when the question needs facts you're not confident about. "
+        "Once you have enough information, give your final answer as plain text "
+        "-- no prefix, and don't mention the tools themselves."
+    )
+    return system_prompt, tool_param
+
+
 async def _ask_with_tools(question: str, ollama_url: str, ollama_model: str) -> str:
-    """Runs the question through Ollama, giving it the MCP server's tools
-    to call (web_search, fetch_page) before it settles on a final answer.
-    Spawns mcp_web_server.py fresh as a stdio subprocess for the duration
-    of this call -- simplest option given /ask's traffic doesn't need a
-    persistent connection."""
+    """Runs the question through Ollama, prompting it to request the MCP
+    server's tools (web_search, fetch_page) by name before it settles on a
+    final answer. Spawns mcp_web_server.py fresh as a stdio subprocess for
+    the duration of this call -- simplest option given /ask's traffic
+    doesn't need a persistent connection."""
     server_params = StdioServerParameters(command=sys.executable, args=[MCP_SERVER_SCRIPT])
 
     async with stdio_client(server_params) as (read, write):
@@ -80,42 +97,35 @@ async def _ask_with_tools(question: str, ollama_url: str, ollama_model: str) -> 
             await session.initialize()
 
             mcp_tools = (await session.list_tools()).tools
-            tools = [
-                {
-                    'type': 'function',
-                    'function': {
-                        'name': t.name,
-                        'description': t.description or '',
-                        'parameters': t.input_schema,
-                    },
-                }
-                for t in mcp_tools
-            ]
+            system_prompt, tool_param = _build_system_prompt(mcp_tools)
 
             messages = [
-                {'role': 'system', 'content': SYSTEM_PROMPT},
+                {'role': 'system', 'content': system_prompt},
                 {'role': 'user', 'content': question},
             ]
 
             for _ in range(MAX_TOOL_ITERATIONS):
-                data = _ollama_chat(messages, tools, ollama_url, ollama_model)
-                message = data.get('message', {})
-                tool_calls = message.get('tool_calls')
+                data = _ollama_chat(messages, ollama_url, ollama_model)
+                content = (data.get('message', {}).get('content') or '').strip()
 
-                if not tool_calls:
-                    return (message.get('content') or '').strip()
+                match = TOOL_CALL_RE.search(content)
+                if not match:
+                    return content
 
-                messages.append(message)
-                for call in tool_calls:
-                    function = call.get('function', {})
-                    name = function.get('name')
-                    args = _parse_tool_args(function.get('arguments'))
+                messages.append({'role': 'assistant', 'content': content})
+
+                name, arg = match.group(1), match.group(2)
+                param_name = tool_param.get(name)
+                if not param_name:
+                    result_text = f"Unknown tool: {name}"
+                else:
                     try:
-                        result = await session.call_tool(name, args)
+                        result = await session.call_tool(name, {param_name: arg})
                         result_text = "\n".join(part.text for part in result.content if hasattr(part, 'text'))
                     except Exception as e:
                         result_text = f"Tool {name} failed: {e}"
-                    messages.append({'role': 'tool', 'content': result_text})
+
+                messages.append({'role': 'user', 'content': f"Tool result:\n{result_text}"})
 
             return "I looked into that but couldn't settle on a final answer in time -- try asking again."
 
