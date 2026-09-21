@@ -10,6 +10,8 @@ import requests
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+import memory_db
+
 logger = logging.getLogger(__name__)
 
 # Point this at the Ollama server via OLLAMA_URL/OLLAMA_MODEL in code.env.
@@ -246,11 +248,16 @@ def _tool_description(tool) -> str:
     return first_sentence.rstrip('.') + '.'
 
 
-def _build_system_prompt(mcp_tools, wants_full_list: bool = False) -> tuple[str, dict[str, str]]:
+def _build_system_prompt(
+    mcp_tools, wants_full_list: bool = False, extra_tools: list[tuple[str, str, str]] | None = None
+) -> tuple[str, dict[str, str]]:
     """Returns (system_prompt, {tool_name: its single string param name}).
     Both of the MCP server's tools (web_search, fetch_page) take exactly
     one string argument, so the param name is read straight off each
-    tool's JSON schema instead of being hardcoded here."""
+    tool's JSON schema instead of being hardcoded here. extra_tools is for
+    tools that aren't served by the MCP subprocess at all (e.g.
+    remember_fact, handled locally since it needs the caller's user_id) --
+    each is (name, param_name, description)."""
     tool_param = {}
     tool_lines = []
     for t in mcp_tools:
@@ -258,6 +265,10 @@ def _build_system_prompt(mcp_tools, wants_full_list: bool = False) -> tuple[str,
         param_name = next(iter(props), 'value')
         tool_param[t.name] = param_name
         tool_lines.append(f'- {t.name}("{param_name}") -- {_tool_description(t)}')
+
+    for name, param_name, description in (extra_tools or []):
+        tool_param[name] = param_name
+        tool_lines.append(f'- {name}("{param_name}") -- {description}')
 
     if wants_full_list:
         brevity_instruction = (
@@ -311,8 +322,17 @@ def _build_system_prompt(mcp_tools, wants_full_list: bool = False) -> tuple[str,
     return system_prompt, tool_param
 
 
+REMEMBER_FACT_DESCRIPTION = (
+    "Saves a short fact about this user to remember in future conversations "
+    "(e.g. their favorite team, where they live, a preference they "
+    "mentioned) -- use this when they tell you something personal worth "
+    "remembering long-term, not for trivia about the search topic itself."
+)
+
+
 async def _ask_with_tools(
-    question: str, history: list[dict], prior_urls: set[str], ollama_url: str, ollama_model: str, on_queued=None
+    question: str, history: list[dict], prior_urls: set[str], ollama_url: str, ollama_model: str,
+    on_queued=None, user_id=None,
 ) -> tuple[str, set[str]]:
     """Runs the question through Ollama, always searching the web first
     rather than leaving that decision to the model -- model-judgment
@@ -324,6 +344,13 @@ async def _ask_with_tools(
     this turn or an earlier one (`prior_urls`), since it has also cited
     plausible-looking URLs it never actually fetched. `history` is the
     prior visible question/answer pairs from this conversation, if any.
+
+    user_id, if given, is used two ways: any long-term facts memory_db has
+    for this user are given to the model as background context up front,
+    and the model is offered a remember_fact tool (handled locally, not
+    through the MCP subprocess, since it needs this same user_id) to save
+    new ones -- both skipped entirely if user_id is None.
+
     Returns (answer, seen_urls) -- the caller merges seen_urls into the
     conversation's remembered sources for future turns. Spawns
     mcp_web_server.py fresh as a stdio subprocess for the duration of this
@@ -336,7 +363,8 @@ async def _ask_with_tools(
             await session.initialize()
 
             mcp_tools = (await session.list_tools()).tools
-            system_prompt, tool_param = _build_system_prompt(mcp_tools, _wants_full_list(question))
+            extra_tools = [('remember_fact', 'fact', REMEMBER_FACT_DESCRIPTION)] if user_id is not None else []
+            system_prompt, tool_param = _build_system_prompt(mcp_tools, _wants_full_list(question), extra_tools)
 
             seen_urls: set[str] = set(prior_urls)
 
@@ -347,8 +375,21 @@ async def _ask_with_tools(
                 search_text = f"Search failed: {e}"
             seen_urls |= _extract_urls(search_text)
 
-            messages = [
-                {'role': 'system', 'content': system_prompt},
+            messages = [{'role': 'system', 'content': system_prompt}]
+
+            known_facts = memory_db.get_facts(user_id) if user_id is not None else []
+            if known_facts:
+                messages.append({
+                    'role': 'system',
+                    'content': (
+                        "What you already know about this user from past conversations: "
+                        + "; ".join(known_facts)
+                        + ". Only bring these up if actually relevant to the current "
+                        "question -- don't force them into unrelated answers."
+                    ),
+                })
+
+            messages += [
                 *history,
                 {'role': 'user', 'content': question},
                 {
@@ -406,18 +447,25 @@ async def _ask_with_tools(
                 messages.append({'role': 'assistant', 'content': content})
 
                 name, arg = match.group(1), match.group(2)
-                param_name = tool_param.get(name)
-                if not param_name:
-                    result_text = f"Unknown tool: {name}"
+
+                if name == 'remember_fact' and user_id is not None:
+                    # Handled locally, not via the MCP subprocess -- it
+                    # needs this user_id, which the subprocess never has.
+                    memory_db.add_fact(user_id, arg)
+                    result_text = "Saved -- you'll remember this about them in future conversations too."
                 else:
-                    try:
-                        result = await session.call_tool(name, {param_name: arg})
-                        result_text = "\n".join(part.text for part in result.content if hasattr(part, 'text'))
-                    except Exception as e:
-                        result_text = f"Tool {name} failed: {e}"
-                seen_urls |= _extract_urls(result_text)
-                if param_name == 'url':
-                    seen_urls.add(arg)
+                    param_name = tool_param.get(name)
+                    if not param_name:
+                        result_text = f"Unknown tool: {name}"
+                    else:
+                        try:
+                            result = await session.call_tool(name, {param_name: arg})
+                            result_text = "\n".join(part.text for part in result.content if hasattr(part, 'text'))
+                        except Exception as e:
+                            result_text = f"Tool {name} failed: {e}"
+                        seen_urls |= _extract_urls(result_text)
+                        if param_name == 'url':
+                            seen_urls.add(arg)
 
                 messages.append({
                     'role': 'user',
@@ -438,7 +486,7 @@ async def _ask_with_tools(
             return "I looked into that but couldn't settle on a final answer in time -- try asking again.", seen_urls
 
 
-def ask(question: str, conversation_id=None, on_queued=None) -> str:
+def ask(question: str, conversation_id=None, on_queued=None, user_id=None) -> str:
     """Sends a question to the Ollama LLM, letting it call the web_search
     and fetch_page tools (served by mcp_web_server.py) when it needs
     current information, and returns its final reply as a string.
@@ -455,6 +503,11 @@ def ask(question: str, conversation_id=None, on_queued=None) -> str:
     (and every source URL seen along the way) so follow-up questions have
     context -- pass None for a one-off question with no memory.
 
+    user_id, if given, lets the model read (and, via remember_fact, add
+    to) long-term facts memory_db has stored about this specific person --
+    unlike conversation_id, this follows them across channels/DMs and
+    survives a bot restart, until they clear it with /forgetme.
+
     on_queued, if given, is called (from this function's own thread) if
     another /chat call is already talking to Ollama, so the caller can let
     the user know they're waiting in line instead of just sitting there."""
@@ -463,7 +516,7 @@ def ask(question: str, conversation_id=None, on_queued=None) -> str:
     history, prior_urls = _get_conversation(conversation_id) if conversation_id is not None else ([], set())
     try:
         full_answer, seen_urls = asyncio.run(
-            _ask_with_tools(question, history, prior_urls, ollama_url, ollama_model, on_queued)
+            _ask_with_tools(question, history, prior_urls, ollama_url, ollama_model, on_queued, user_id)
         )
         full_answer = full_answer or "DJ Shinx's brain came back empty. Try rephrasing that."
         displayed_answer = full_answer if _wants_source(question) else _strip_citation(full_answer)

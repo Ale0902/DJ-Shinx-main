@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import responses
 import botFunctions as bf
 import llmask
+import memory_db
 import sports
 import f1
 import os
@@ -64,6 +65,7 @@ COMMAND_CATEGORIES = {
     'mcstatus': 'Other',
     'chat': 'AI',
     'forget': 'AI',
+    'forgetme': 'AI',
 }
 CATEGORY_ORDER = ['Sports', 'Music', 'Fun', 'AI', 'Other']
 
@@ -317,7 +319,7 @@ def run_discord_bot():
                 loop,
             )
 
-        result = await asyncio.to_thread(llmask.ask, message, conversation_id, on_queued)
+        result = await asyncio.to_thread(llmask.ask, message, conversation_id, on_queued, ctx.author.id)
         chunks = llmask.chunk_response(result)
         await thinking_message.edit(embed=_embed(chunks[0]))
         for chunk in chunks[1:]:
@@ -328,6 +330,14 @@ def run_discord_bot():
         conversation_id = (ctx.channel.id, ctx.author.id)
         await asyncio.to_thread(llmask.forget, conversation_id)
         await ctx.send(embed=_embed("Alright, clean slate — I've forgotten our conversation so far."))
+
+    @client.hybrid_command(name="forgetme", description="Deletes everything Agent Shinx has remembered about you long-term")
+    async def forgetme(ctx: commands.Context):
+        deleted = await asyncio.to_thread(memory_db.clear_facts, ctx.author.id)
+        if deleted:
+            await ctx.send(embed=_embed(f"Done — deleted {deleted} thing{'s' if deleted != 1 else ''} I'd remembered about you."))
+        else:
+            await ctx.send(embed=_embed("There wasn't anything long-term saved about you to delete."))
 
     @client.hybrid_command(name="help", description="Lists every command DJ Shinx offers")
     async def help_command(ctx: commands.Context):
