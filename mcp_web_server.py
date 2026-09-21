@@ -1,13 +1,24 @@
 """MCP server exposing basic web-browsing tools (search + page fetch) for
-DJ Shinx's /ask command. Run as a subprocess over stdio -- llmask.py spawns
-it directly, so it's never started standalone in production.
+DJ Shinx's /chat command. Run as a subprocess over stdio -- llmask.py
+spawns it directly, so it's never started standalone in production.
 
-Search uses the Brave Search API (free tier: 2,000 queries/month, needs
-BRAVE_API_KEY in code.env) since DuckDuckGo's endpoints actively block
-non-browser clients with a JS anomaly challenge.
+IMPORTANT: this process's stdout is the MCP protocol channel (JSON-RPC
+framed messages read by llmask.py's stdio_client). Never print()/log to
+stdout here -- it will corrupt the protocol. Anything printed goes to
+stderr instead, which is safe and flows through to journalctl since this
+is a child process of the bot's own systemd-managed process.
+
+Search tries the Brave Search API first (free tier: 2,000 queries/month,
+needs BRAVE_API_KEY in code.env), falling back to a self-hosted SearXNG
+instance (SEARXNG_URL, default http://127.0.0.1:8080) if Brave is
+unconfigured, rate-limited, or otherwise fails -- so search keeps working
+past Brave's monthly quota without needing a second paid API. DuckDuckGo's
+endpoints were tried first but actively block non-browser clients with a
+JS anomaly challenge, so they aren't a viable option here.
 """
 import os
 import re
+import sys
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -21,18 +32,21 @@ mcp = MCPServer("dj-shinx-web")
 USER_AGENT = "DJ-Shinx-Bot/1.0 (+https://github.com/Ale0902/DJ-Shinx-main)"
 MAX_FETCH_CHARS = 4000
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
+SEARXNG_URL = os.getenv('SEARXNG_URL', 'http://127.0.0.1:8080')
 HTML_TAG_RE = re.compile(r"<[^<]+?>")
 
 
-@mcp.tool()
-def web_search(query: str) -> str:
-    """Searches the web via the Brave Search API and returns the top
-    results as title/url/snippet entries. Use this to look up current
-    events, facts, or anything you're not confident about before
-    answering."""
+def _log(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+def _brave_search(query: str) -> list[dict] | None:
+    """Returns [{title, url, description}, ...] from Brave, or None if
+    it's unconfigured or the request failed for any reason (missing key,
+    rate limited, network error) so the caller can fall back to SearXNG."""
     api_key = os.getenv('BRAVE_API_KEY')
     if not api_key:
-        return "Web search isn't configured (missing BRAVE_API_KEY in code.env)."
+        return None
 
     try:
         response = requests.get(
@@ -44,19 +58,55 @@ def web_search(query: str) -> str:
         response.raise_for_status()
         results = response.json().get('web', {}).get('results', [])
     except Exception as e:
-        return f"Search failed: {e}"
+        _log(f"web_search: Brave failed, falling back to SearXNG: {e}")
+        return None
 
+    return [
+        {
+            'title': r.get('title', ''),
+            'url': r.get('url', ''),
+            # Brave highlights matched terms with <strong> tags in the snippet.
+            'description': HTML_TAG_RE.sub('', r.get('description', '')),
+        }
+        for r in results[:5]
+    ]
+
+
+def _searxng_search(query: str) -> list[dict] | None:
+    """Returns [{title, url, description}, ...] from a self-hosted SearXNG
+    instance, or None if it's unreachable (e.g. not set up)."""
+    try:
+        response = requests.get(
+            f'{SEARXNG_URL}/search',
+            params={'q': query, 'format': 'json'},
+            timeout=10,
+        )
+        response.raise_for_status()
+        results = response.json().get('results', [])
+    except Exception as e:
+        _log(f"web_search: SearXNG fallback also failed: {e}")
+        return None
+
+    return [
+        {'title': r.get('title', ''), 'url': r.get('url', ''), 'description': r.get('content', '')}
+        for r in results[:5]
+    ]
+
+
+@mcp.tool()
+def web_search(query: str) -> str:
+    """Searches the web and returns the top results as title/url/snippet
+    entries. Use this to look up current events, facts, or anything you're
+    not confident about before answering."""
+    results = _brave_search(query)
+    if results is None:
+        results = _searxng_search(query)
+    if results is None:
+        return "Web search is currently unavailable -- both Brave and the local SearXNG fallback failed."
     if not results:
         return "No results found."
 
-    lines = []
-    for r in results[:5]:
-        title = r.get('title', '')
-        url = r.get('url', '')
-        # Brave highlights matched terms with <strong> tags in the snippet.
-        description = HTML_TAG_RE.sub('', r.get('description', ''))
-        lines.append(f"{title}\n{url}\n{description}")
-
+    lines = [f"{r['title']}\n{r['url']}\n{r['description']}" for r in results]
     return "\n\n".join(lines)
 
 
