@@ -138,6 +138,28 @@ def _wants_source(question: str) -> bool:
     return bool(SOURCE_REQUEST_RE.search(question))
 
 
+# Narrower than SOURCE_REQUEST_RE above -- specifically "the user wants an
+# actual image asset", not just "show me a link". Deliberately excludes
+# "video": a request like "give me a youtube video of X" wants a page about
+# X (which web_search already handles fine), not a thumbnail. Decides which
+# tool the forced up-front search below uses, because a generic web_search
+# for "picture of X" comes back with pages *about* X -- Pinterest boards,
+# wallpaper-gallery listings -- never a direct image file, and the model
+# doesn't reliably make the extra image_search call itself afterward; it
+# just cites one of those gallery pages as if it were the image. Same
+# failure pattern as the other soft/judgment instructions in this file,
+# fixed the same way: detect it deterministically instead of trusting the
+# model to juggle two competing instructions correctly.
+IMAGE_REQUEST_RE = re.compile(
+    r'\b(picture|pictures|pic|pics|image|images|photo|photos|wallpaper|wallpapers)\b',
+    re.IGNORECASE,
+)
+
+
+def _wants_image(question: str) -> bool:
+    return bool(IMAGE_REQUEST_RE.search(question))
+
+
 def _strip_citation(content: str) -> str:
     return SOURCE_LINE_RE.sub('', content).rstrip()
 
@@ -325,7 +347,10 @@ def _build_system_prompt(
         "If asked for a picture, photo, image, or video of something, use "
         "image_search (not web_search) and put the exact image_url it "
         "returns as your 'Source: <url>' line, copied exactly, not "
-        "paraphrased or shortened -- that's what actually gets displayed."
+        "paraphrased or shortened -- Discord displays that image inline "
+        "automatically, so you ARE able to show it. Don't say you're "
+        "unable to provide images when a tool result actually gave you a "
+        "direct image_url to use."
     )
     return system_prompt, tool_param
 
@@ -342,12 +367,17 @@ async def _ask_with_tools(
     question: str, history: list[dict], prior_urls: set[str], ollama_url: str, ollama_model: str,
     on_queued=None, user_id=None,
 ) -> tuple[str, set[str]]:
-    """Runs the question through Ollama, always searching the web first
-    rather than leaving that decision to the model -- model-judgment
-    triggering was tried and repeatedly failed (it kept answering current-
-    events-style questions from stale training data instead of searching).
-    The model can still call web_search/fetch_page itself afterward to
-    refine the query or read a specific page. Also verifies the model's
+    """Runs the question through Ollama, always searching first rather
+    than leaving that decision to the model -- model-judgment triggering
+    was tried and repeatedly failed (it kept answering current-events-
+    style questions from stale training data instead of searching). Uses
+    image_search instead of web_search for that forced first call when
+    the question is clearly asking for a picture/photo/image (see
+    _wants_image) -- otherwise the model ends up with gallery/listing
+    pages instead of a direct image link, and won't reliably make the
+    extra tool call itself to fix that. The model can still call
+    web_search/fetch_page/image_search itself afterward to refine the
+    query or read a specific page. Also verifies the model's
     final "Source: <url>" citation against URLs actually seen from a tool
     this turn or an earlier one (`prior_urls`), since it has also cited
     plausible-looking URLs it never actually fetched. `history` is the
@@ -376,8 +406,9 @@ async def _ask_with_tools(
 
             seen_urls: set[str] = set(prior_urls)
 
+            initial_tool = 'image_search' if _wants_image(question) else 'web_search'
             try:
-                search_result = await session.call_tool('web_search', {'query': question})
+                search_result = await session.call_tool(initial_tool, {'query': question})
                 search_text = "\n".join(part.text for part in search_result.content if hasattr(part, 'text'))
             except Exception as e:
                 search_text = f"Search failed: {e}"
@@ -397,13 +428,14 @@ async def _ask_with_tools(
                     ),
                 })
 
+            result_label = "Image search results" if initial_tool == 'image_search' else "Web search results"
             messages += [
                 *history,
                 {'role': 'user', 'content': question},
                 {
                     'role': 'user',
                     'content': (
-                        f"Web search results for the question above:\n{search_text}\n\n"
+                        f"{result_label} for the question above:\n{search_text}\n\n"
                         "Answer using these if they're relevant. If they're not "
                         "relevant (e.g. this is just casual conversation), ignore "
                         "them and answer normally. Only cite a URL that actually "
@@ -427,8 +459,9 @@ async def _ask_with_tools(
                         # once more with a fresh, better-targeted search
                         # instead of just accepting "I was wrong" as final.
                         retried = True
+                        retry_tool = 'image_search' if _wants_image(retry_query) else 'web_search'
                         try:
-                            retry_result = await session.call_tool('web_search', {'query': retry_query})
+                            retry_result = await session.call_tool(retry_tool, {'query': retry_query})
                             retry_text = "\n".join(
                                 part.text for part in retry_result.content if hasattr(part, 'text')
                             )

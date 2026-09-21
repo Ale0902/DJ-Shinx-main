@@ -30,6 +30,18 @@ EMBED_COLOR = discord.Color.from_rgb(0, 255, 255)
 # the embed itself rather than just as a clickable text link.
 IMAGE_URL_RE = re.compile(r'https?://\S+\.(?:jpg|jpeg|png|gif|webp)\b', re.IGNORECASE)
 
+# Sites Discord natively unfurls into a rich preview (video thumbnail +
+# player for YouTube, full card for a tweet/X post) -- but only when the
+# URL is in a plain message's raw content, never when it's just text inside
+# an embed's description (same reason /vini below is sent as plain text
+# instead of an embed). /chat's citations are a dynamic URL the model
+# picks, not a fixed one, so instead of leaving it as dead text inside the
+# embed, it's also re-sent as its own plain message so Discord unfurls it.
+RICH_PREVIEW_URL_RE = re.compile(
+    r'https?://(?:www\.)?(?:youtube\.com/watch\S*|youtu\.be/\S+|(?:twitter|x)\.com/\w+/status/\d+\S*)',
+    re.IGNORECASE,
+)
+
 
 def _embed(text: str) -> discord.Embed:
     """Wraps plain text in a cyan-bordered embed -- the standard shape for
@@ -337,6 +349,14 @@ def run_discord_bot():
         await thinking_message.edit(embed=_embed(chunks[0]))
         for chunk in chunks[1:]:
             await ctx.send(embed=_embed(chunk))
+
+        # If the answer cited a YouTube/X link, also send it as its own
+        # plain message so Discord's native preview actually renders --
+        # see RICH_PREVIEW_URL_RE above for why that can't happen from
+        # inside the embed itself.
+        preview_match = RICH_PREVIEW_URL_RE.search(result)
+        if preview_match:
+            await ctx.send(preview_match.group(0))
 
     @client.hybrid_command(name="forget", description="Clears your conversation history with DJ Shinx's AI brain")
     async def forget(ctx: commands.Context):
