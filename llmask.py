@@ -25,13 +25,15 @@ OLLAMA_TIMEOUT = 120
 BASE = os.path.dirname(os.path.abspath(__file__))
 MCP_SERVER_SCRIPT = os.path.join(BASE, 'mcp_web_server.py')
 
-# In-memory conversation history, keyed by whatever the caller passes as a
+# In-memory conversation state, keyed by whatever the caller passes as a
 # conversation_id (bot.py uses (channel_id, user_id), so each person's
-# conversation in a given channel is independent). Only holds the visible
-# question/answer pairs -- not each turn's internal TOOL_CALL/tool-result
-# scaffolding, so it doesn't balloon with raw search dumps. Cleared on bot
-# restart; that's fine, this is meant to feel like a chat session, not a
-# permanent record.
+# conversation in a given channel is independent). Holds both the visible
+# question/answer pairs (not each turn's internal TOOL_CALL/tool-result
+# scaffolding, so it doesn't balloon with raw search dumps) and the set of
+# URLs actually seen from a tool across the whole conversation, so a later
+# "what's your source for that" can be verified against something found in
+# an earlier turn, not just the current one. Cleared on bot restart; that's
+# fine, this is meant to feel like a chat session, not a permanent record.
 CONVERSATION_TTL_SECONDS = 20 * 60  # idle this long and the next /ask starts fresh
 MAX_HISTORY_TURNS = 8  # question/answer pairs kept; oldest dropped first
 
@@ -39,26 +41,27 @@ _conversations: dict = {}
 _conversations_lock = threading.Lock()
 
 
-def _get_history(conversation_id) -> list[dict]:
+def _get_conversation(conversation_id) -> tuple[list[dict], set[str]]:
     with _conversations_lock:
         entry = _conversations.get(conversation_id)
         if not entry:
-            return []
-        last_used, history = entry
+            return [], set()
+        last_used, history, seen_urls = entry
         if time.monotonic() - last_used > CONVERSATION_TTL_SECONDS:
             del _conversations[conversation_id]
-            return []
-        return list(history)
+            return [], set()
+        return list(history), set(seen_urls)
 
 
-def _save_history(conversation_id, history: list[dict]) -> None:
+def _save_conversation(conversation_id, history: list[dict], seen_urls: set[str]) -> None:
     trimmed = history[-(MAX_HISTORY_TURNS * 2):]
     with _conversations_lock:
-        _conversations[conversation_id] = (time.monotonic(), trimmed)
+        _conversations[conversation_id] = (time.monotonic(), trimmed, seen_urls)
 
 
 def forget(conversation_id) -> None:
-    """Clears a conversation's history -- backs the /forget command."""
+    """Clears a conversation's history and remembered sources -- backs the
+    /forget command."""
     with _conversations_lock:
         _conversations.pop(conversation_id, None)
 
@@ -82,9 +85,9 @@ def _extract_urls(text: str) -> set[str]:
 
 def _verify_citation(content: str, seen_urls: set[str]) -> str:
     """Strips the model's "Source: <url>" line if that URL never actually
-    came back from a tool call this turn -- catches the model citing a
-    plausible-looking URL it recalled from training data instead of one it
-    genuinely looked up."""
+    came back from a tool call this turn (or an earlier turn in the same
+    conversation) -- catches the model citing a plausible-looking URL it
+    recalled from training data instead of one it genuinely looked up."""
     match = SOURCE_LINE_RE.search(content)
     if not match:
         return content
@@ -95,6 +98,25 @@ def _verify_citation(content: str, seen_urls: set[str]) -> str:
 
     stripped = SOURCE_LINE_RE.sub('', content).rstrip()
     return stripped + "\n\n(Note: I couldn't verify that source against what I actually looked up -- treat this with caution.)"
+
+
+# Whether *this turn's* message is asking to be shown a source/link, so the
+# citation only gets displayed when actually requested rather than tacked
+# onto every reply -- checked against the current message only, since a
+# fresh request each turn naturally covers both asking up front and asking
+# as a separate follow-up.
+SOURCE_REQUEST_RE = re.compile(
+    r'\b(source|sources|link|links|url|urls|cite|citation|reference|proof|prove it)\b',
+    re.IGNORECASE,
+)
+
+
+def _wants_source(question: str) -> bool:
+    return bool(SOURCE_REQUEST_RE.search(question))
+
+
+def _strip_citation(content: str) -> str:
+    return SOURCE_LINE_RE.sub('', content).rstrip()
 
 
 def _ollama_chat(messages: list[dict], ollama_url: str, ollama_model: str) -> dict:
@@ -174,7 +196,9 @@ def _build_system_prompt(mcp_tools) -> tuple[str, dict[str, str]]:
     return system_prompt, tool_param
 
 
-async def _ask_with_tools(question: str, history: list[dict], ollama_url: str, ollama_model: str) -> str:
+async def _ask_with_tools(
+    question: str, history: list[dict], prior_urls: set[str], ollama_url: str, ollama_model: str
+) -> tuple[str, set[str]]:
     """Runs the question through Ollama, always searching the web first
     rather than leaving that decision to the model -- model-judgment
     triggering was tried and repeatedly failed (it kept answering current-
@@ -182,11 +206,14 @@ async def _ask_with_tools(question: str, history: list[dict], ollama_url: str, o
     The model can still call web_search/fetch_page itself afterward to
     refine the query or read a specific page. Also verifies the model's
     final "Source: <url>" citation against URLs actually seen from a tool
-    this turn, since it has also cited plausible-looking URLs it never
-    actually fetched. `history` is the prior visible question/answer pairs
-    from this conversation, if any. Spawns mcp_web_server.py fresh as a
-    stdio subprocess for the duration of this call -- simplest option
-    given /chat's traffic doesn't need a persistent connection."""
+    this turn or an earlier one (`prior_urls`), since it has also cited
+    plausible-looking URLs it never actually fetched. `history` is the
+    prior visible question/answer pairs from this conversation, if any.
+    Returns (answer, seen_urls) -- the caller merges seen_urls into the
+    conversation's remembered sources for future turns. Spawns
+    mcp_web_server.py fresh as a stdio subprocess for the duration of this
+    call -- simplest option given /chat's traffic doesn't need a
+    persistent connection."""
     server_params = StdioServerParameters(command=sys.executable, args=[MCP_SERVER_SCRIPT])
 
     async with stdio_client(server_params) as (read, write):
@@ -196,7 +223,7 @@ async def _ask_with_tools(question: str, history: list[dict], ollama_url: str, o
             mcp_tools = (await session.list_tools()).tools
             system_prompt, tool_param = _build_system_prompt(mcp_tools)
 
-            seen_urls: set[str] = set()
+            seen_urls: set[str] = set(prior_urls)
 
             try:
                 search_result = await session.call_tool('web_search', {'query': question})
@@ -228,7 +255,7 @@ async def _ask_with_tools(question: str, history: list[dict], ollama_url: str, o
 
                 match = TOOL_CALL_RE.search(content)
                 if not match:
-                    return _verify_citation(content, seen_urls)
+                    return _verify_citation(content, seen_urls), seen_urls
 
                 messages.append({'role': 'assistant', 'content': content})
 
@@ -262,7 +289,7 @@ async def _ask_with_tools(question: str, history: list[dict], ollama_url: str, o
                     ),
                 })
 
-            return "I looked into that but couldn't settle on a final answer in time -- try asking again."
+            return "I looked into that but couldn't settle on a final answer in time -- try asking again.", seen_urls
 
 
 def ask(question: str, conversation_id=None) -> str:
@@ -270,23 +297,33 @@ def ask(question: str, conversation_id=None) -> str:
     and fetch_page tools (served by mcp_web_server.py) when it needs
     current information, and returns its final reply as a string.
 
+    The reply only includes a "Source: <url>" citation if this message
+    itself asks for one (e.g. "what's your source", "give me a link") --
+    otherwise it's held back from what's shown, even though the model is
+    still told to work one out internally so a *later* "what was your
+    source" follow-up can recall it from conversation history instead of
+    needing to re-search.
+
     conversation_id, if given, is an opaque hashable key (bot.py uses
-    (channel_id, user_id)) used to remember prior question/answer pairs so
-    follow-up questions have context -- pass None for a one-off question
-    with no memory."""
+    (channel_id, user_id)) used to remember prior question/answer pairs
+    (and every source URL seen along the way) so follow-up questions have
+    context -- pass None for a one-off question with no memory."""
     ollama_url = os.getenv('OLLAMA_URL', 'http://localhost:11434')
     ollama_model = os.getenv('OLLAMA_MODEL', 'gemma3:4b')
-    history = _get_history(conversation_id) if conversation_id is not None else []
+    history, prior_urls = _get_conversation(conversation_id) if conversation_id is not None else ([], set())
     try:
-        answer = asyncio.run(_ask_with_tools(question, history, ollama_url, ollama_model))
-        answer = answer or "DJ Shinx's brain came back empty. Try rephrasing that."
+        full_answer, seen_urls = asyncio.run(_ask_with_tools(question, history, prior_urls, ollama_url, ollama_model))
+        full_answer = full_answer or "DJ Shinx's brain came back empty. Try rephrasing that."
+        displayed_answer = full_answer if _wants_source(question) else _strip_citation(full_answer)
         if conversation_id is not None:
-            updated = history + [
+            updated_history = history + [
                 {'role': 'user', 'content': question},
-                {'role': 'assistant', 'content': answer},
+                # Keep the citation in memory even when hidden this turn,
+                # so a later "what was your source" can recall it as-is.
+                {'role': 'assistant', 'content': full_answer},
             ]
-            _save_history(conversation_id, updated)
-        return answer
+            _save_conversation(conversation_id, updated_history, prior_urls | seen_urls)
+        return displayed_answer
     except requests.exceptions.ConnectionError:
         return "Couldn't reach the LLM — is Ollama running on the VM and reachable from here?"
     except requests.exceptions.Timeout:
