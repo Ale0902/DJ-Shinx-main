@@ -47,6 +47,57 @@ SOCCER_COMPETITIONS = [
     ]),
 ]
 
+# Competitions between national teams, as opposed to clubs -- only these get
+# a flag next to the team name, since a club's ESPN displayName (e.g. "Real
+# Madrid") isn't a country.
+INTERNATIONAL_COMPETITIONS = {
+    "World Cup", "European Championship", "Copa América", "Nations League", "World Cup Qualifiers",
+}
+
+# Flag emoji by ESPN's displayName for that country, covering every UEFA
+# member (the confederation these competitions run most often) plus the
+# commonly-seen nations from the other confederations in World Cup
+# Qualifiers/Copa América/World Cup. Unlisted names just show without a
+# flag rather than erroring.
+COUNTRY_FLAGS = {
+    # UEFA
+    "Albania": "🇦🇱", "Andorra": "🇦🇩", "Armenia": "🇦🇲", "Austria": "🇦🇹",
+    "Azerbaijan": "🇦🇿", "Belarus": "🇧🇾", "Belgium": "🇧🇪", "Bosnia-Herzegovina": "🇧🇦",
+    "Bulgaria": "🇧🇬", "Croatia": "🇭🇷", "Cyprus": "🇨🇾", "Czechia": "🇨🇿",
+    "Denmark": "🇩🇰", "England": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "Estonia": "🇪🇪", "Faroe Islands": "🇫🇴",
+    "Finland": "🇫🇮", "France": "🇫🇷", "Georgia": "🇬🇪", "Germany": "🇩🇪",
+    "Gibraltar": "🇬🇮", "Greece": "🇬🇷", "Hungary": "🇭🇺", "Iceland": "🇮🇸",
+    "Israel": "🇮🇱", "Italy": "🇮🇹", "Kazakhstan": "🇰🇿", "Kosovo": "🇽🇰",
+    "Latvia": "🇱🇻", "Liechtenstein": "🇱🇮", "Lithuania": "🇱🇹", "Luxembourg": "🇱🇺",
+    "Malta": "🇲🇹", "Moldova": "🇲🇩", "Montenegro": "🇲🇪", "Netherlands": "🇳🇱",
+    "North Macedonia": "🇲🇰", "Northern Ireland": "🇬🇧", "Norway": "🇳🇴", "Poland": "🇵🇱",
+    "Portugal": "🇵🇹", "Republic of Ireland": "🇮🇪", "Romania": "🇷🇴", "Russia": "🇷🇺",
+    "San Marino": "🇸🇲", "Scotland": "🏴󠁧󠁢󠁳󠁣󠁴󠁿", "Serbia": "🇷🇸", "Slovakia": "🇸🇰",
+    "Slovenia": "🇸🇮", "Spain": "🇪🇸", "Sweden": "🇸🇪", "Switzerland": "🇨🇭",
+    "Türkiye": "🇹🇷", "Ukraine": "🇺🇦", "Wales": "🏴󠁧󠁢󠁷󠁬󠁳󠁿",
+    # CONMEBOL
+    "Argentina": "🇦🇷", "Bolivia": "🇧🇴", "Brazil": "🇧🇷", "Chile": "🇨🇱",
+    "Colombia": "🇨🇴", "Ecuador": "🇪🇨", "Paraguay": "🇵🇾", "Peru": "🇵🇪",
+    "Uruguay": "🇺🇾", "Venezuela": "🇻🇪",
+    # CONCACAF
+    "United States": "🇺🇸", "Mexico": "🇲🇽", "Canada": "🇨🇦", "Costa Rica": "🇨🇷",
+    "Jamaica": "🇯🇲", "Panama": "🇵🇦", "Honduras": "🇭🇳", "El Salvador": "🇸🇻",
+    "Guatemala": "🇬🇹", "Trinidad and Tobago": "🇹🇹",
+    # AFC
+    "Japan": "🇯🇵", "South Korea": "🇰🇷", "Australia": "🇦🇺", "Saudi Arabia": "🇸🇦",
+    "Iran": "🇮🇷", "Qatar": "🇶🇦", "Iraq": "🇮🇶", "China PR": "🇨🇳",
+    # CAF
+    "Nigeria": "🇳🇬", "Egypt": "🇪🇬", "Senegal": "🇸🇳", "Morocco": "🇲🇦",
+    "Ghana": "🇬🇭", "Cameroon": "🇨🇲", "Tunisia": "🇹🇳", "Algeria": "🇩🇿",
+    "South Africa": "🇿🇦", "Ivory Coast": "🇨🇮",
+}
+
+
+def _flag_label(competitor: dict) -> str:
+    name = competitor['team']['displayName']
+    flag = COUNTRY_FLAGS.get(name)
+    return f"{flag} {name}" if flag else name
+
 SOCCER_PAGE_LIMIT = 1900  # leaves headroom under Discord's 2000-char cap
 
 EASTERN = ZoneInfo("America/New_York")
@@ -614,7 +665,8 @@ def soccer_pages() -> list[tuple[str, str]]:
         events = sorted(events_by_competition[name].values(), key=lambda e: e['date'])
         if not events:
             continue
-        lines = [_format_game_line(event, is_soccer=True) for event in events]
+        label_fn = _flag_label if name in INTERNATIONAL_COMPETITIONS else None
+        lines = [_format_game_line(event, is_soccer=True, label_fn=label_fn) for event in events]
         pages.append((name, _ansi_page(f"## {name}", lines)))
 
     return pages
@@ -663,10 +715,10 @@ def _match_event_lines(competition: dict) -> list[str]:
     return [line for _, line in events]
 
 
-def _format_live_soccer_line(event: dict) -> str:
+def _format_live_soccer_line(event: dict, label_fn: Callable[[dict], str] | None = None) -> str:
     """A live match's score line plus, indented beneath it, each goal and
     red card so far with who was involved and the minute it happened."""
-    lines = [_format_game_line(event, is_soccer=True)]
+    lines = [_format_game_line(event, is_soccer=True, label_fn=label_fn)]
     lines.extend(_match_event_lines(event['competitions'][0]))
     return "\n".join(lines)
 
@@ -695,7 +747,8 @@ def live_soccer_matches() -> list[str]:
         events = sorted(live_by_competition[name].values(), key=lambda e: e['date'])
         if not events:
             continue
-        lines = [_format_live_soccer_line(event) for event in events]
+        label_fn = _flag_label if name in INTERNATIONAL_COMPETITIONS else None
+        lines = [_format_live_soccer_line(event, label_fn=label_fn) for event in events]
         header = "## Live Soccer Right Now!\n\n**{}**".format(name) if not messages else f"**{name}**"
         messages.extend(_chunk_ansi_block(header, lines))
 
@@ -726,7 +779,8 @@ def soccer_results_today() -> list[str]:
         events = sorted(results_by_competition[name].values(), key=lambda e: e['date'])
         if not events:
             continue
-        lines = [_format_game_line(event, is_soccer=True) for event in events]
+        label_fn = _flag_label if name in INTERNATIONAL_COMPETITIONS else None
+        lines = [_format_game_line(event, is_soccer=True, label_fn=label_fn) for event in events]
         header = "## Today's Soccer Results!\n\n**{}**".format(name) if not messages else f"**{name}**"
         messages.extend(_chunk_ansi_block(header, lines))
 
