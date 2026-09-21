@@ -69,6 +69,33 @@ def forget(conversation_id) -> None:
 # regardless of native tool-calling support.
 TOOL_CALL_RE = re.compile(r'TOOL_CALL:\s*(\w+)\(\s*["\']([^"\']*)["\']\s*\)')
 
+# For verifying the model's final "Source: <url>" citation against URLs it
+# actually saw from a tool this turn, rather than trusting it not to cite
+# something recalled from memory (it has, more than once).
+URL_RE = re.compile(r'https?://\S+')
+SOURCE_LINE_RE = re.compile(r'^Source:\s*(\S+)\s*$', re.MULTILINE)
+
+
+def _extract_urls(text: str) -> set[str]:
+    return {u.rstrip('.,)') for u in URL_RE.findall(text)}
+
+
+def _verify_citation(content: str, seen_urls: set[str]) -> str:
+    """Strips the model's "Source: <url>" line if that URL never actually
+    came back from a tool call this turn -- catches the model citing a
+    plausible-looking URL it recalled from training data instead of one it
+    genuinely looked up."""
+    match = SOURCE_LINE_RE.search(content)
+    if not match:
+        return content
+
+    cited = match.group(1).rstrip('.,)/')
+    if any(cited in url or url in cited for url in seen_urls):
+        return content
+
+    stripped = SOURCE_LINE_RE.sub('', content).rstrip()
+    return stripped + "\n\n(Note: I couldn't verify that source against what I actually looked up -- treat this with caution.)"
+
 
 def _ollama_chat(messages: list[dict], ollama_url: str, ollama_model: str) -> dict:
     response = requests.post(
@@ -112,7 +139,7 @@ def _build_system_prompt(mcp_tools) -> tuple[str, dict[str, str]]:
         tool_lines.append(f'- {t.name}("{param_name}") -- {description}')
 
     system_prompt = (
-        "You are DJ Shinx, a Discord bot. Answer in a normal, direct "
+        "You are Agent Shinx, a Discord bot. Answer in a normal, direct "
         "conversational tone -- not overly casual, not full of slang or "
         "emoji, just a clear and accurate answer.\n\n"
         "You can look up information using these tools:\n"
@@ -148,16 +175,18 @@ def _build_system_prompt(mcp_tools) -> tuple[str, dict[str, str]]:
 
 
 async def _ask_with_tools(question: str, history: list[dict], ollama_url: str, ollama_model: str) -> str:
-    """Runs the question through Ollama, prompting it to request the MCP
-    server's tools (web_search, fetch_page) by name when it needs current
-    or uncertain information before settling on a final answer -- the
-    model decides whether a question warrants a search rather than one
-    happening automatically every time, to avoid burning a search (and a
-    few seconds of latency) on every casual message. `history` is the
-    prior visible question/answer pairs from this conversation, if any.
-    Spawns mcp_web_server.py fresh as a stdio subprocess for the duration
-    of this call -- simplest option given /ask's traffic doesn't need a
-    persistent connection."""
+    """Runs the question through Ollama, always searching the web first
+    rather than leaving that decision to the model -- model-judgment
+    triggering was tried and repeatedly failed (it kept answering current-
+    events-style questions from stale training data instead of searching).
+    The model can still call web_search/fetch_page itself afterward to
+    refine the query or read a specific page. Also verifies the model's
+    final "Source: <url>" citation against URLs actually seen from a tool
+    this turn, since it has also cited plausible-looking URLs it never
+    actually fetched. `history` is the prior visible question/answer pairs
+    from this conversation, if any. Spawns mcp_web_server.py fresh as a
+    stdio subprocess for the duration of this call -- simplest option
+    given /chat's traffic doesn't need a persistent connection."""
     server_params = StdioServerParameters(command=sys.executable, args=[MCP_SERVER_SCRIPT])
 
     async with stdio_client(server_params) as (read, write):
@@ -167,10 +196,30 @@ async def _ask_with_tools(question: str, history: list[dict], ollama_url: str, o
             mcp_tools = (await session.list_tools()).tools
             system_prompt, tool_param = _build_system_prompt(mcp_tools)
 
+            seen_urls: set[str] = set()
+
+            try:
+                search_result = await session.call_tool('web_search', {'query': question})
+                search_text = "\n".join(part.text for part in search_result.content if hasattr(part, 'text'))
+            except Exception as e:
+                search_text = f"Search failed: {e}"
+            seen_urls |= _extract_urls(search_text)
+
             messages = [
                 {'role': 'system', 'content': system_prompt},
                 *history,
                 {'role': 'user', 'content': question},
+                {
+                    'role': 'user',
+                    'content': (
+                        f"Web search results for the question above:\n{search_text}\n\n"
+                        "Answer using these if they're relevant. If they're not "
+                        "relevant (e.g. this is just casual conversation), ignore "
+                        "them and answer normally. Only cite a URL that actually "
+                        "appears in a tool result you received this conversation -- "
+                        "never one from memory."
+                    ),
+                },
             ]
 
             for _ in range(MAX_TOOL_ITERATIONS):
@@ -179,7 +228,7 @@ async def _ask_with_tools(question: str, history: list[dict], ollama_url: str, o
 
                 match = TOOL_CALL_RE.search(content)
                 if not match:
-                    return content
+                    return _verify_citation(content, seen_urls)
 
                 messages.append({'role': 'assistant', 'content': content})
 
@@ -193,6 +242,9 @@ async def _ask_with_tools(question: str, history: list[dict], ollama_url: str, o
                         result_text = "\n".join(part.text for part in result.content if hasattr(part, 'text'))
                     except Exception as e:
                         result_text = f"Tool {name} failed: {e}"
+                seen_urls |= _extract_urls(result_text)
+                if param_name == 'url':
+                    seen_urls.add(arg)
 
                 messages.append({
                     'role': 'user',
