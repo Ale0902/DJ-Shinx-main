@@ -89,6 +89,32 @@ def forget(conversation_id) -> None:
 # apostrophe.
 TOOL_CALL_RE = re.compile(r'TOOL_CALL:\s*(\w+)\(\s*(["\'])(.*)\2\s*\)')
 
+# Fallback for a close-but-not-quite call: the small local model has been
+# observed dropping the "TOOL_CALL:" prefix and the argument's quote marks
+# entirely (e.g. a bare "stock_price_history(MSFT:2023-09-18:today)" on
+# its own line) while still getting the tool name and argument content
+# right. Only trusted when the captured name is an actual known tool (see
+# _extract_tool_call) -- ordinary prose essentially never takes the shape
+# of one of these specific names immediately followed by "(...)", so this
+# doesn't risk misreading a normal sentence as a tool call. Anchored to a
+# whole line (MULTILINE ^...$) rather than searched anywhere in the
+# text, for the same reason.
+LOOSE_TOOL_CALL_RE = re.compile(r'^(\w+)\(\s*["\']?(.*?)["\']?\s*\)\s*$', re.MULTILINE)
+
+
+def _extract_tool_call(content: str, known_tools) -> tuple[str, str] | None:
+    """Returns (name, arg) if content contains a tool call in either the
+    strict or loose form, else None."""
+    match = TOOL_CALL_RE.search(content)
+    if match:
+        return match.group(1), match.group(3)
+
+    loose_match = LOOSE_TOOL_CALL_RE.search(content)
+    if loose_match and loose_match.group(1) in known_tools:
+        return loose_match.group(1), loose_match.group(2).strip('"\'')
+
+    return None
+
 # For verifying the model's final "Source: <url>" citation against URLs it
 # actually saw from a tool this turn, rather than trusting it not to cite
 # something recalled from memory (it has, more than once).
@@ -502,8 +528,8 @@ async def _ask_with_tools(
                 data = _ollama_chat(messages, ollama_url, ollama_model, on_queued)
                 content = (data.get('message', {}).get('content') or '').strip()
 
-                match = TOOL_CALL_RE.search(content)
-                if not match:
+                tool_call = _extract_tool_call(content, tool_param)
+                if not tool_call:
                     if not retried and SELF_CORRECTION_RE.search(content):
                         # The model itself doesn't trust this answer -- try
                         # once more with a fresh, better-targeted search
@@ -547,7 +573,7 @@ async def _ask_with_tools(
 
                 messages.append({'role': 'assistant', 'content': content})
 
-                name, arg = match.group(1), match.group(3)
+                name, arg = tool_call
 
                 if name == 'remember_fact' and user_id is not None:
                     # Handled locally, not via the MCP subprocess -- it
