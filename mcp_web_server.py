@@ -476,7 +476,10 @@ def stock_price_history(query: str) -> str:
     "how's X doing currently, lately, or this year" -- not a comparison
     across specific named periods (use compare_stock_performance for
     that instead). Format: just "SYMBOL" for the trailing year up to
-    today, or "SYMBOL:YYYY-MM-DD:YYYY-MM-DD" for an explicit range.
+    today (use this for almost everything -- it already covers
+    "lately"/"currently"/"this year"), "SYMBOL:YYYY-MM-DD" (or
+    "SYMBOL:today") for the trailing year up to a specific end date, or
+    "SYMBOL:YYYY-MM-DD:YYYY-MM-DD" for an explicit start and end.
     Never estimate the price or trend yourself -- this always reflects
     today's actual date and real market data, which you're often wrong
     about on your own."""
@@ -486,17 +489,24 @@ def stock_price_history(query: str) -> str:
         return "Couldn't parse that -- format is 'SYMBOL' or 'SYMBOL:YYYY-MM-DD:YYYY-MM-DD'."
     symbol = _resolve_symbol(symbol_name)
 
-    if len(parts) == 1:
-        end = datetime.datetime.now(EASTERN).date()
-        start = end - datetime.timedelta(days=DEFAULT_HISTORY_DAYS)
-    elif len(parts) == 3:
-        try:
+    try:
+        if len(parts) == 1:
+            end = datetime.datetime.now(EASTERN).date()
+            start = end - datetime.timedelta(days=DEFAULT_HISTORY_DAYS)
+        elif len(parts) == 2:
+            # Shorthand for "the trailing year up to this end date" --
+            # accepted because the model has been observed trying to
+            # write exactly this (e.g. "S&P 500:today") when it only
+            # wants a different end point, not a specific start too.
+            end = _parse_date_field(parts[1])
+            start = end - datetime.timedelta(days=DEFAULT_HISTORY_DAYS)
+        elif len(parts) == 3:
             start = _parse_date_field(parts[1])
             end = _parse_date_field(parts[2])
-        except ValueError:
-            return "Couldn't parse those dates -- format is 'SYMBOL' or 'SYMBOL:YYYY-MM-DD:YYYY-MM-DD'."
-    else:
-        return "Couldn't parse that -- format is 'SYMBOL' or 'SYMBOL:YYYY-MM-DD:YYYY-MM-DD'."
+        else:
+            return "Couldn't parse that -- format is 'SYMBOL' or 'SYMBOL:YYYY-MM-DD:YYYY-MM-DD'."
+    except ValueError:
+        return "Couldn't parse those dates -- format is 'SYMBOL' or 'SYMBOL:YYYY-MM-DD:YYYY-MM-DD'."
 
     if start > end:
         return "Start date is after the end date -- swap them and try again."

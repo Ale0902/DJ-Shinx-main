@@ -101,10 +101,23 @@ TOOL_CALL_RE = re.compile(r'TOOL_CALL:\s*(\w+)\(\s*(["\'])(.*)\2\s*\)')
 # text, for the same reason.
 LOOSE_TOOL_CALL_RE = re.compile(r'^(\w+)\(\s*["\']?(.*?)["\']?\s*\)\s*$', re.MULTILINE)
 
+# Third, even looser fallback specifically for stock_price_history: the
+# model has also been observed dropping the tool name AND parens
+# entirely, leaving just a bare argument-shaped fragment as its WHOLE
+# reply (e.g. "S&P 500:today" instead of a real call). Only matched
+# against the ENTIRE stripped response (fullmatch, not a substring
+# search), with sentence punctuation banned from the "symbol" part and a
+# date/"today" suffix REQUIRED -- an ordinary short final answer never
+# takes this exact shape (it has real sentence structure), so this is a
+# narrow catch for that one specific failure, not a general "guess what
+# this means" parser. Never routed to compare_stock_performance, whose
+# format always has a "|", which this excludes.
+BARE_STOCK_ARG_RE = re.compile(r'^[^|:.,!?\n]{1,40}(?::(?:\d{4}-\d{2}-\d{2}|today)){1,2}$', re.IGNORECASE)
+
 
 def _extract_tool_call(content: str, known_tools) -> tuple[str, str] | None:
-    """Returns (name, arg) if content contains a tool call in either the
-    strict or loose form, else None."""
+    """Returns (name, arg) if content contains a tool call in the strict,
+    loose, or bare-stock-argument form, else None."""
     match = TOOL_CALL_RE.search(content)
     if match:
         return match.group(1), match.group(3)
@@ -112,6 +125,9 @@ def _extract_tool_call(content: str, known_tools) -> tuple[str, str] | None:
     loose_match = LOOSE_TOOL_CALL_RE.search(content)
     if loose_match and loose_match.group(1) in known_tools:
         return loose_match.group(1), loose_match.group(2).strip('"\'')
+
+    if 'stock_price_history' in known_tools and BARE_STOCK_ARG_RE.fullmatch(content.strip()):
+        return 'stock_price_history', content.strip()
 
     return None
 
@@ -407,9 +423,13 @@ def _build_system_prompt(
         "YYYY-MM-DD:YYYY-MM-DD\", for example \"S&P 500 | Trump Term "
         "1:2017-01-20:2021-01-19 | Biden Term:2021-01-20:2025-01-19\".\n"
         "- stock_price_history: a single ongoing trend -- \"how's X "
-        "doing currently/lately/this year\". Format: just \"SYMBOL\" for "
-        "the trailing year up to today, or \"SYMBOL:YYYY-MM-DD:"
-        "YYYY-MM-DD\" for a specific range.\n"
+        "doing currently/lately/this year\". Just use \"SYMBOL\" alone "
+        "(e.g. \"AAPL\") for almost all of these -- it already covers "
+        "the trailing year up to today, which is close enough for "
+        "\"this year\"/\"lately\"/\"currently\" too. Only add a date "
+        "(\"SYMBOL:YYYY-MM-DD:YYYY-MM-DD\", or \"SYMBOL:YYYY-MM-DD\" for "
+        "just a different end point) if the user names a genuinely "
+        "different specific range.\n"
         "Both tools render an actual chart automatically, which the user "
         "will see -- you DO have this ability. Never say you're unable "
         "to show a graph/chart or suggest the user make one themselves "
