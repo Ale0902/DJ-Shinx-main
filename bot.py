@@ -341,29 +341,21 @@ def run_discord_bot():
 
     @client.hybrid_command(name="chat", description="Chat with DJ Shinx's AI brain")
     @discord.app_commands.describe(message="What do you want to say?")
+    @commands.cooldown(1, 15, commands.BucketType.user)
     async def chat(ctx: commands.Context, *, message: str):
         question_line = f"**From {ctx.author.display_name}:** {message}"
         thinking_message = await ctx.send(embed=_embed(_with_question(question_line, "🧠 Thinking...")))
         conversation_id = (ctx.channel.id, ctx.author.id)
 
         loop = asyncio.get_running_loop()
-        notified = {'shown': False}
 
-        def on_queued():
-            if notified['shown']:
-                return
-            notified['shown'] = True
+        def on_status(text: str):
             asyncio.run_coroutine_threadsafe(
-                thinking_message.edit(
-                    embed=_embed(_with_question(
-                        question_line,
-                        "⏳ Someone else is chatting with me right now -- you're queued, this might take a bit longer than usual...",
-                    ))
-                ),
+                thinking_message.edit(embed=_embed(_with_question(question_line, text))),
                 loop,
             )
 
-        result, chart_path = await asyncio.to_thread(llmask.ask, message, conversation_id, on_queued, ctx.author.id)
+        result, chart_path = await asyncio.to_thread(llmask.ask, message, conversation_id, on_status, ctx.author.id)
         chunks = llmask.chunk_response(result)
 
         first_embed = _embed(_with_question(question_line, chunks[0]))
@@ -392,6 +384,20 @@ def run_discord_bot():
         preview_match = RICH_PREVIEW_URL_RE.search(result)
         if preview_match:
             await ctx.send(preview_match.group(0))
+
+    @chat.error
+    async def chat_error(ctx: commands.Context, error: commands.CommandError):
+        # Ollama requests are serialized behind one lock (see llmask.py),
+        # so one person spamming /chat directly slows down everyone else's
+        # queue -- this cooldown is what actually protects that, this just
+        # reports it instead of leaving the interaction failing silently.
+        if isinstance(error, commands.CommandOnCooldown):
+            await ctx.send(
+                embed=_embed(f"Slow down a bit — try again in {error.retry_after:.0f}s."),
+                ephemeral=True,
+            )
+        else:
+            raise error
 
     @client.hybrid_command(name="forget", description="Clears your conversation history with DJ Shinx's AI brain")
     async def forget(ctx: commands.Context):

@@ -30,6 +30,16 @@ MAX_TOOL_ITERATIONS = 4
 # too tight and cut off an otherwise-successful generation.
 OLLAMA_TIMEOUT = 180
 
+# Ollama silently truncates older context rather than erroring once a
+# request exceeds this, and its own default (historically 2048 unless a
+# model's Modelfile overrides it) is easy to blow past once the system
+# prompt, tool descriptions, known facts, conversation history, and search
+# results are all combined -- which would look like the model randomly
+# "forgetting" earlier instructions or context with no visible cause.
+# Override via OLLAMA_NUM_CTX in code.env if this doesn't fit your model's
+# available VRAM.
+DEFAULT_OLLAMA_NUM_CTX = 8192
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 MCP_SERVER_SCRIPT = os.path.join(BASE, 'mcp_web_server.py')
 
@@ -280,20 +290,30 @@ def _pick_retry_query(question: str, history: list[dict]) -> str:
 _ollama_lock = threading.Lock()
 
 
-def _ollama_chat(messages: list[dict], ollama_url: str, ollama_model: str, on_queued=None) -> dict:
-    """on_queued(), if given, is called at most once if this call has to
-    wait for another in-flight request to finish first -- lets the caller
-    tell the user they're queued instead of leaving them sat waiting with
-    no explanation."""
+def _ollama_chat(
+    messages: list[dict], ollama_url: str, ollama_model: str, ollama_num_ctx: int, on_status=None,
+) -> dict:
+    """on_status(text), if given, is called with a queued-notice if this
+    call has to wait for another in-flight request to finish first -- lets
+    the caller tell the user they're queued instead of leaving them sat
+    waiting with no explanation."""
     if not _ollama_lock.acquire(blocking=False):
-        if on_queued:
-            on_queued()
+        if on_status:
+            on_status(
+                "⏳ Someone else is chatting with me right now -- you're queued, "
+                "this might take a bit longer than usual..."
+            )
         _ollama_lock.acquire()  # now block until it's actually our turn
 
     try:
         response = requests.post(
             f'{ollama_url}/api/chat',
-            json={'model': ollama_model, 'messages': messages, 'stream': False},
+            json={
+                'model': ollama_model,
+                'messages': messages,
+                'stream': False,
+                'options': {'num_ctx': ollama_num_ctx},
+            },
             timeout=OLLAMA_TIMEOUT,
         )
     finally:
@@ -455,10 +475,30 @@ REMEMBER_FACT_DESCRIPTION = (
     "remembering long-term, not for trivia about the search topic itself."
 )
 
+# User-facing status text shown while a tool call is in flight, so /chat's
+# progress message says something more specific than just "Thinking..." the
+# whole time a multi-step lookup is running. Falls back to a generic label
+# for any tool not listed here, so a new tool added later still shows
+# something reasonable instead of silently showing nothing.
+TOOL_STATUS_LABELS = {
+    'web_search': "🔍 Searching the web...",
+    'image_search': "🖼️ Searching for images...",
+    'fetch_page': "📄 Reading a page...",
+    'wikipedia_summary': "📖 Checking Wikipedia...",
+    'calculate': "🧮 Calculating...",
+    'compare_stock_performance': "📈 Pulling stock data...",
+    'stock_price_history': "📈 Pulling stock data...",
+    'remember_fact': "💾 Saving that...",
+}
+
+
+def _tool_status_label(name: str) -> str:
+    return TOOL_STATUS_LABELS.get(name, f"🔧 Using {name}...")
+
 
 async def _ask_with_tools(
     question: str, history: list[dict], prior_urls: set[str], ollama_url: str, ollama_model: str,
-    on_queued=None, user_id=None,
+    ollama_num_ctx: int, on_status=None, user_id=None,
 ) -> tuple[str, set[str], str | None]:
     """Runs the question through Ollama, always searching first rather
     than leaving that decision to the model -- model-judgment triggering
@@ -488,7 +528,12 @@ async def _ask_with_tools(
     any this turn) up to bot.py to attach as a real Discord file, deleting
     the local copy once sent. Spawns mcp_web_server.py fresh as a stdio
     subprocess for the duration of this call -- simplest option given
-    /chat's traffic doesn't need a persistent connection."""
+    /chat's traffic doesn't need a persistent connection.
+
+    on_status(text), if given, is called with a short human-readable status
+    ("Searching the web...", "Reading a page...", etc.) at each stage of
+    the lookup, so the caller can show live progress instead of a single
+    static "Thinking..." for the whole duration -- see TOOL_STATUS_LABELS."""
     server_params = StdioServerParameters(command=sys.executable, args=[MCP_SERVER_SCRIPT])
 
     async with stdio_client(server_params) as (read, write):
@@ -503,6 +548,8 @@ async def _ask_with_tools(
             chart_path: str | None = None
 
             initial_tool = 'image_search' if _wants_image(question) else 'web_search'
+            if on_status:
+                on_status(_tool_status_label(initial_tool))
             try:
                 search_result = await session.call_tool(initial_tool, {'query': question})
                 search_text = "\n".join(part.text for part in search_result.content if hasattr(part, 'text'))
@@ -545,7 +592,9 @@ async def _ask_with_tools(
             retry_query = _pick_retry_query(question, history)
 
             for _ in range(MAX_TOOL_ITERATIONS):
-                data = _ollama_chat(messages, ollama_url, ollama_model, on_queued)
+                if on_status:
+                    on_status("🧠 Thinking...")
+                data = _ollama_chat(messages, ollama_url, ollama_model, ollama_num_ctx, on_status)
                 content = (data.get('message', {}).get('content') or '').strip()
 
                 tool_call = _extract_tool_call(content, tool_param)
@@ -556,6 +605,8 @@ async def _ask_with_tools(
                         # instead of just accepting "I was wrong" as final.
                         retried = True
                         retry_tool = 'image_search' if _wants_image(retry_query) else 'web_search'
+                        if on_status:
+                            on_status("🔁 Double-checking that...")
                         try:
                             retry_result = await session.call_tool(retry_tool, {'query': retry_query})
                             retry_text = "\n".join(
@@ -594,6 +645,8 @@ async def _ask_with_tools(
                 messages.append({'role': 'assistant', 'content': content})
 
                 name, arg = tool_call
+                if on_status:
+                    on_status(_tool_status_label(name))
 
                 if name == 'remember_fact' and user_id is not None:
                     # Handled locally, not via the MCP subprocess -- it
@@ -637,7 +690,7 @@ async def _ask_with_tools(
             return "I looked into that but couldn't settle on a final answer in time -- try asking again.", seen_urls, chart_path
 
 
-def ask(question: str, conversation_id=None, on_queued=None, user_id=None) -> tuple[str, str | None]:
+def ask(question: str, conversation_id=None, on_status=None, user_id=None) -> tuple[str, str | None]:
     """Sends a question to the Ollama LLM, letting it call the web_search
     and fetch_page tools (served by mcp_web_server.py) when it needs
     current information, and returns (reply, chart_path) -- chart_path is
@@ -662,15 +715,25 @@ def ask(question: str, conversation_id=None, on_queued=None, user_id=None) -> tu
     unlike conversation_id, this follows them across channels/DMs and
     survives a bot restart, until they clear it with /forgetme.
 
-    on_queued, if given, is called (from this function's own thread) if
-    another /chat call is already talking to Ollama, so the caller can let
-    the user know they're waiting in line instead of just sitting there."""
+    on_status, if given, is called (from this function's own thread) with a
+    short human-readable status -- "Searching the web...", "Reading a
+    page...", a queued notice if another /chat call is already talking to
+    Ollama, etc. -- at each stage of the lookup, so the caller can show
+    live progress instead of a single static message for the whole
+    duration."""
     ollama_url = os.getenv('OLLAMA_URL', 'http://localhost:11434')
     ollama_model = os.getenv('OLLAMA_MODEL', 'gemma3:4b')
+    try:
+        ollama_num_ctx = int(os.getenv('OLLAMA_NUM_CTX', str(DEFAULT_OLLAMA_NUM_CTX)))
+    except ValueError:
+        logger.warning("OLLAMA_NUM_CTX must be an integer; using default %d", DEFAULT_OLLAMA_NUM_CTX)
+        ollama_num_ctx = DEFAULT_OLLAMA_NUM_CTX
     history, prior_urls = _get_conversation(conversation_id) if conversation_id is not None else ([], set())
     try:
         full_answer, seen_urls, chart_path = asyncio.run(
-            _ask_with_tools(question, history, prior_urls, ollama_url, ollama_model, on_queued, user_id)
+            _ask_with_tools(
+                question, history, prior_urls, ollama_url, ollama_model, ollama_num_ctx, on_status, user_id,
+            )
         )
         full_answer = full_answer or "DJ Shinx's brain came back empty. Try rephrasing that."
         displayed_answer = full_answer if _wants_source(question) else _strip_citation(full_answer)
