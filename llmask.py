@@ -368,20 +368,28 @@ def _build_system_prompt(
         "automatically, so you ARE able to show it. Don't say you're "
         "unable to provide images when a tool result actually gave you a "
         "direct image_url to use.\n\n"
-        "If asked to compare or describe how a stock or index has "
-        "performed over specific named periods (e.g. a president's term, "
-        "a particular year), call compare_stock_performance yourself "
-        "with this exact format: \"SYMBOL | Label:YYYY-MM-DD:YYYY-MM-DD | "
-        "Label:YYYY-MM-DD:YYYY-MM-DD\" -- for example \"S&P 500 | Trump "
-        "Term 1:2017-01-20:2021-01-19 | Biden Term:2021-01-20:2025-01-19\". "
-        "Use well-known public dates (like inauguration dates) for the "
-        "period boundaries, but never invent or estimate the percentage "
-        "change itself -- this tool computes it from real market data, "
-        "which is more reliable than whatever a general web search result "
-        "happens to say, so trust it over that if the two disagree. "
-        "Don't use apostrophes in labels (write \"Biden Term\", not "
-        "\"Biden's Term\"). It already renders a chart, so just summarize "
-        "what it found -- don't add a 'Source:' line for it."
+        "For any stock or index question, never estimate or invent a "
+        "price, percentage, or trend yourself -- use one of these two "
+        "tools, which compute it from real market data:\n"
+        "- compare_stock_performance: a comparison across specific NAMED "
+        "periods (e.g. two presidential terms, two different years). "
+        "Format: \"SYMBOL | Label:YYYY-MM-DD:YYYY-MM-DD | Label:"
+        "YYYY-MM-DD:YYYY-MM-DD\", for example \"S&P 500 | Trump Term "
+        "1:2017-01-20:2021-01-19 | Biden Term:2021-01-20:2025-01-19\".\n"
+        "- stock_price_history: a single ongoing trend -- \"how's X "
+        "doing currently/lately/this year\". Format: just \"SYMBOL\" for "
+        "the trailing year up to today, or \"SYMBOL:YYYY-MM-DD:"
+        "YYYY-MM-DD\" for a specific range.\n"
+        "For either tool, use the literal word \"today\" in place of a "
+        "date for an ongoing period's end (e.g. \"Trump Term "
+        "2:2025-01-20:today\") instead of guessing what today's date is "
+        "yourself -- you're frequently wrong about that, defaulting to a "
+        "date near your training cutoff instead of the real one. Use "
+        "well-known public dates (like inauguration dates) for period "
+        "starts. Don't use apostrophes in labels (write \"Biden Term\", "
+        "not \"Biden's Term\"). Both tools already render a chart, so "
+        "just summarize what they found -- don't add a 'Source:' line, "
+        "it'll be stripped out automatically if you do."
     )
     return system_prompt, tool_param
 
@@ -516,6 +524,16 @@ async def _ask_with_tools(
                             ),
                         })
                         continue
+
+                    if chart_path:
+                        # compare_stock_performance/stock_price_history are
+                        # told not to add a Source line -- there's no real
+                        # URL for tool-computed chart data, so strip one off
+                        # if the model added one anyway, rather than run it
+                        # through _verify_citation and show a "couldn't
+                        # verify" caveat under an otherwise fully
+                        # tool-grounded, real chart.
+                        return _strip_citation(content), seen_urls, chart_path
 
                     return _verify_citation(content, seen_urls), seen_urls, chart_path
 

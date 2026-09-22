@@ -70,7 +70,13 @@ STOCK_ALIASES = {
     'dow': '^DJI', 'dow jones': '^DJI', 'dow jones industrial average': '^DJI',
     'nasdaq': '^IXIC', 'nasdaq composite': '^IXIC',
 }
-PERIOD_SPEC_RE = re.compile(r'^([^:|]+):(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$')
+# A date field may be the literal word "today" instead of YYYY-MM-DD, for
+# an ongoing period's end -- the model has repeatedly picked a wrong,
+# stale "current" date on its own (e.g. defaulting to a date near its
+# training cutoff instead of the real one), so this lets it defer to
+# Python's own clock instead of guessing.
+PERIOD_SPEC_RE = re.compile(r'^([^:|]+):(\d{4}-\d{2}-\d{2}|today):(\d{4}-\d{2}-\d{2}|today)$', re.IGNORECASE)
+DEFAULT_HISTORY_DAYS = 365
 
 
 def _log(message: str) -> None:
@@ -286,6 +292,12 @@ def _resolve_symbol(name: str) -> str:
     return STOCK_ALIASES.get(key, name.strip().upper())
 
 
+def _parse_date_field(value: str) -> datetime.date:
+    if value.strip().lower() == 'today':
+        return datetime.datetime.now(EASTERN).date()
+    return datetime.date.fromisoformat(value)
+
+
 def _parse_periods(spec: str) -> list[tuple[str, datetime.date, datetime.date]]:
     """Parses 'Label:start:end | Label:start:end | ...' into
     [(label, start_date, end_date), ...], raising ValueError with a
@@ -297,10 +309,10 @@ def _parse_periods(spec: str) -> list[tuple[str, datetime.date, datetime.date]]:
         if not match:
             raise ValueError(
                 f"Couldn't parse period '{segment}' -- expected "
-                "Label:YYYY-MM-DD:YYYY-MM-DD."
+                "Label:YYYY-MM-DD:YYYY-MM-DD (or 'today' in place of a date)."
             )
         label, start, end = match.groups()
-        periods.append((label.strip(), datetime.date.fromisoformat(start), datetime.date.fromisoformat(end)))
+        periods.append((label.strip(), _parse_date_field(start), _parse_date_field(end)))
     return periods
 
 
@@ -373,13 +385,18 @@ def _render_bar_chart(title: str, data: list[tuple[str, float]]) -> str:
 def compare_stock_performance(query: str) -> str:
     """Looks up real historical closing prices for a stock or index and
     charts the percent change across one or more labeled date ranges.
-    Use this for any "how has X performed" or "compare X across periods"
-    question involving a stock ticker or a major index like the S&P 500,
-    Dow, or Nasdaq -- never estimate or invent a percentage yourself,
-    always get it from this tool. Format: "SYMBOL | Label:YYYY-MM-DD:
-    YYYY-MM-DD | Label:YYYY-MM-DD:YYYY-MM-DD", for example "S&P 500 |
-    Trump Term 1:2017-01-20:2021-01-19 | Biden Term:2021-01-20:2025-01-19".
-    Avoid apostrophes in labels -- write "Biden Term", not "Biden's Term"."""
+    Use this for a comparison across specific NAMED periods (e.g. two
+    presidential terms, two different years) -- for a single ongoing
+    trend ("how's X doing currently/lately/this year"), use
+    stock_price_history instead, which draws a line graph over time
+    rather than one bar per period. Never estimate or invent a
+    percentage yourself, always get it from this tool. Format: "SYMBOL |
+    Label:YYYY-MM-DD:YYYY-MM-DD | Label:YYYY-MM-DD:YYYY-MM-DD", for
+    example "S&P 500 | Trump Term 1:2017-01-20:2021-01-19 | Biden
+    Term:2021-01-20:2025-01-19". For an ongoing period, use the literal
+    word "today" instead of guessing a date, e.g. "Trump Term
+    2:2025-01-20:today". Avoid apostrophes in labels -- write "Biden
+    Term", not "Biden's Term"."""
     parts = query.split('|', 1)
     if len(parts) != 2:
         return "Couldn't parse that -- format is 'SYMBOL | Label:YYYY-MM-DD:YYYY-MM-DD | ...'."
@@ -403,7 +420,7 @@ def compare_stock_performance(query: str) -> str:
         int(datetime.datetime.combine(overall_end + datetime.timedelta(days=1), datetime.time.min, tzinfo=datetime.timezone.utc).timestamp()),
     )
     if not points:
-        return f"Couldn't fetch historical data for '{symbol_name}' ({symbol}) -- check the symbol and try again."
+        return f"Couldn't fetch historical data for '{symbol_name}' ({symbol}) -- make sure you used its real ticker symbol (e.g. ACN for Accenture, AAPL for Apple), not the company name, and try again."
 
     lines = [f"{symbol_name} ({symbol}) performance by period:"]
     chart_data = []
@@ -426,6 +443,85 @@ def compare_stock_performance(query: str) -> str:
     chart_path = _render_bar_chart(f"{symbol_name} % change by period", chart_data)
     lines.append(f"\nCHART_PATH: {chart_path}")
     return "\n".join(lines)
+
+
+def _render_line_chart(title: str, points: list[tuple[datetime.date, float]]) -> str:
+    """Renders a closing-price line chart to a PNG under CHARTS_DIR and
+    returns its path. Same dark styling as _render_bar_chart."""
+    os.makedirs(CHARTS_DIR, exist_ok=True)
+    dates = [p[0] for p in points]
+    closes = [p[1] for p in points]
+
+    fig, ax = plt.subplots(figsize=(7, 4.5), dpi=120)
+    fig.patch.set_facecolor('#313338')
+    ax.set_facecolor('#313338')
+    ax.plot(dates, closes, color='#00FFFF', linewidth=1.6)
+    ax.set_ylabel('Price', color='white')
+    ax.set_title(title, color='white')
+    ax.tick_params(colors='white')
+    for spine in ax.spines.values():
+        spine.set_color('#888888')
+    fig.autofmt_xdate()
+
+    path = os.path.join(CHARTS_DIR, f"{uuid.uuid4().hex}.png")
+    fig.savefig(path, facecolor=fig.get_facecolor(), bbox_inches='tight')
+    plt.close(fig)
+    return path
+
+
+@mcp.tool()
+def stock_price_history(query: str) -> str:
+    """Looks up a stock or index's real closing-price history and charts
+    it as a line graph over time. Use this for a single ongoing trend --
+    "how's X doing currently, lately, or this year" -- not a comparison
+    across specific named periods (use compare_stock_performance for
+    that instead). Format: just "SYMBOL" for the trailing year up to
+    today, or "SYMBOL:YYYY-MM-DD:YYYY-MM-DD" for an explicit range.
+    Never estimate the price or trend yourself -- this always reflects
+    today's actual date and real market data, which you're often wrong
+    about on your own."""
+    parts = [p.strip() for p in query.split(':')]
+    symbol_name = parts[0]
+    if not symbol_name:
+        return "Couldn't parse that -- format is 'SYMBOL' or 'SYMBOL:YYYY-MM-DD:YYYY-MM-DD'."
+    symbol = _resolve_symbol(symbol_name)
+
+    if len(parts) == 1:
+        end = datetime.datetime.now(EASTERN).date()
+        start = end - datetime.timedelta(days=DEFAULT_HISTORY_DAYS)
+    elif len(parts) == 3:
+        try:
+            start = _parse_date_field(parts[1])
+            end = _parse_date_field(parts[2])
+        except ValueError:
+            return "Couldn't parse those dates -- format is 'SYMBOL' or 'SYMBOL:YYYY-MM-DD:YYYY-MM-DD'."
+    else:
+        return "Couldn't parse that -- format is 'SYMBOL' or 'SYMBOL:YYYY-MM-DD:YYYY-MM-DD'."
+
+    if start > end:
+        return "Start date is after the end date -- swap them and try again."
+
+    points = _fetch_daily_closes(
+        symbol,
+        int(datetime.datetime.combine(start, datetime.time.min, tzinfo=datetime.timezone.utc).timestamp()),
+        int(datetime.datetime.combine(end + datetime.timedelta(days=1), datetime.time.min, tzinfo=datetime.timezone.utc).timestamp()),
+    )
+    if not points:
+        return f"Couldn't fetch historical data for '{symbol_name}' ({symbol}) -- make sure you used its real ticker symbol (e.g. ACN for Accenture, AAPL for Apple), not the company name, and try again."
+
+    first_date, first_close = points[0]
+    last_date, last_close = points[-1]
+    pct_change = (last_close - first_close) / first_close * 100
+    high = max(p[1] for p in points)
+    low = min(p[1] for p in points)
+
+    chart_path = _render_line_chart(f"{symbol_name} ({symbol}) closing price", points)
+    return (
+        f"{symbol_name} ({symbol}) from {first_date} to {last_date}: "
+        f"{first_close:.2f} -> {last_close:.2f} ({pct_change:+.1f}%). "
+        f"Range over that span: {low:.2f} to {high:.2f}.\n"
+        f"\nCHART_PATH: {chart_path}"
+    )
 
 
 # A restricted arithmetic evaluator for the calculate() tool -- walks the
