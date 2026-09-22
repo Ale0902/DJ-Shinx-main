@@ -341,7 +341,7 @@ def run_discord_bot():
 
     @client.hybrid_command(name="chat", description="Chat with DJ Shinx's AI brain")
     @discord.app_commands.describe(message="What do you want to say?")
-    @commands.cooldown(1, 15, commands.BucketType.user)
+    @commands.cooldown(1, 5, commands.BucketType.user)
     async def chat(ctx: commands.Context, *, message: str):
         question_line = f"**From {ctx.author.display_name}:** {message}"
         thinking_message = await ctx.send(embed=_embed(_with_question(question_line, "🧠 Thinking...")))
