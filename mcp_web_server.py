@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import ast
+import uuid
 import math
 import operator
 import datetime
@@ -31,6 +32,13 @@ from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from mcp.server.mcpserver import MCPServer
+
+# Agg is a non-interactive, no-display backend -- must be selected before
+# pyplot is imported anywhere, since this runs headless on the VM (no X
+# server/display available for the default interactive backend).
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(dotenv_path=os.path.join(BASE, 'code.env'))
@@ -42,8 +50,27 @@ MAX_FETCH_CHARS = 4000
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 SEARXNG_URL = os.getenv('SEARXNG_URL', 'http://127.0.0.1:8080')
 WIKIPEDIA_SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/{}"
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{}"
 EASTERN = ZoneInfo("America/New_York")
 HTML_TAG_RE = re.compile(r"<[^<]+?>")
+
+# charts/ is shared with llmask.py (same machine, separate process) purely
+# by both sides agreeing on this path -- this tool renders a PNG here and
+# returns its path in the result text; llmask.py picks that path back out
+# and bot.py attaches the file to Discord, deleting it once sent.
+CHARTS_DIR = os.path.join(BASE, 'charts')
+MAX_CHART_PERIODS = 6
+
+# A few common names for major indices -- anything else is assumed to
+# already be a plain ticker symbol (e.g. AAPL, TSLA) and used as-is,
+# uppercased, which is exactly the symbol Yahoo Finance expects.
+STOCK_ALIASES = {
+    's&p 500': '^GSPC', 's&p500': '^GSPC', 'sp500': '^GSPC', 's&p': '^GSPC',
+    'smp': '^GSPC', 'smp500': '^GSPC',
+    'dow': '^DJI', 'dow jones': '^DJI', 'dow jones industrial average': '^DJI',
+    'nasdaq': '^IXIC', 'nasdaq composite': '^IXIC',
+}
+PERIOD_SPEC_RE = re.compile(r'^([^:|]+):(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$')
 
 
 def _log(message: str) -> None:
@@ -252,6 +279,153 @@ def wikipedia_summary(topic: str) -> str:
 
     url = data.get('content_urls', {}).get('desktop', {}).get('page', '')
     return f"{extract}\n\nSource: {url}" if url else extract
+
+
+def _resolve_symbol(name: str) -> str:
+    key = name.strip().lower()
+    return STOCK_ALIASES.get(key, name.strip().upper())
+
+
+def _parse_periods(spec: str) -> list[tuple[str, datetime.date, datetime.date]]:
+    """Parses 'Label:start:end | Label:start:end | ...' into
+    [(label, start_date, end_date), ...], raising ValueError with a
+    message the model can act on if a segment doesn't match."""
+    periods = []
+    for segment in spec.split('|'):
+        segment = segment.strip()
+        match = PERIOD_SPEC_RE.match(segment)
+        if not match:
+            raise ValueError(
+                f"Couldn't parse period '{segment}' -- expected "
+                "Label:YYYY-MM-DD:YYYY-MM-DD."
+            )
+        label, start, end = match.groups()
+        periods.append((label.strip(), datetime.date.fromisoformat(start), datetime.date.fromisoformat(end)))
+    return periods
+
+
+def _fetch_daily_closes(symbol: str, start_ts: int, end_ts: int) -> list[tuple[datetime.date, float]] | None:
+    """Returns [(date, close), ...] sorted ascending from Yahoo Finance's
+    public chart API, or None if the request failed or the symbol doesn't
+    exist. No API key needed -- unlike Stooq's download endpoint (which
+    now sits behind a JS browser-verification challenge, the same kind of
+    block that ruled out DuckDuckGo for search), this JSON endpoint has
+    stayed reliably scriptable."""
+    try:
+        response = requests.get(
+            YAHOO_CHART_URL.format(quote(symbol)),
+            params={'period1': start_ts, 'period2': end_ts, 'interval': '1d'},
+            headers={"User-Agent": USER_AGENT},
+            timeout=10,
+        )
+        response.raise_for_status()
+        result = response.json().get('chart', {}).get('result')
+    except Exception as e:
+        _log(f"compare_stock_performance: fetch failed for {symbol}: {e}")
+        return None
+    if not result:
+        return None
+
+    timestamps = result[0].get('timestamp') or []
+    quote_block = (result[0].get('indicators', {}).get('quote') or [{}])[0] or {}
+    closes = quote_block.get('close') or []
+    points = [
+        (datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).date(), close)
+        for ts, close in zip(timestamps, closes)
+        if close is not None
+    ]
+    return points or None
+
+
+def _render_bar_chart(title: str, data: list[tuple[str, float]]) -> str:
+    """Renders a labeled bar chart to a PNG under CHARTS_DIR and returns
+    its path. Solid dark background (not transparent) so the white text
+    stays legible regardless of the viewer's own Discord theme."""
+    os.makedirs(CHARTS_DIR, exist_ok=True)
+    labels = [d[0] for d in data]
+    values = [d[1] for d in data]
+
+    fig, ax = plt.subplots(figsize=(7, 4.5), dpi=120)
+    fig.patch.set_facecolor('#313338')
+    ax.set_facecolor('#313338')
+    bars = ax.bar(labels, values, color='#00FFFF')
+    ax.axhline(0, color='#888888', linewidth=0.8)
+    ax.set_ylabel('% change', color='white')
+    ax.set_title(title, color='white')
+    ax.tick_params(colors='white')
+    for spine in ax.spines.values():
+        spine.set_color('#888888')
+    for bar, value in zip(bars, values):
+        ax.annotate(
+            f'{value:+.1f}%',
+            (bar.get_x() + bar.get_width() / 2, bar.get_height()),
+            textcoords="offset points", xytext=(0, 4 if value >= 0 else -14),
+            ha='center', color='white', fontsize=9,
+        )
+
+    path = os.path.join(CHARTS_DIR, f"{uuid.uuid4().hex}.png")
+    fig.savefig(path, facecolor=fig.get_facecolor(), bbox_inches='tight')
+    plt.close(fig)
+    return path
+
+
+@mcp.tool()
+def compare_stock_performance(query: str) -> str:
+    """Looks up real historical closing prices for a stock or index and
+    charts the percent change across one or more labeled date ranges.
+    Use this for any "how has X performed" or "compare X across periods"
+    question involving a stock ticker or a major index like the S&P 500,
+    Dow, or Nasdaq -- never estimate or invent a percentage yourself,
+    always get it from this tool. Format: "SYMBOL | Label:YYYY-MM-DD:
+    YYYY-MM-DD | Label:YYYY-MM-DD:YYYY-MM-DD", for example "S&P 500 |
+    Trump Term 1:2017-01-20:2021-01-19 | Biden Term:2021-01-20:2025-01-19".
+    Avoid apostrophes in labels -- write "Biden Term", not "Biden's Term"."""
+    parts = query.split('|', 1)
+    if len(parts) != 2:
+        return "Couldn't parse that -- format is 'SYMBOL | Label:YYYY-MM-DD:YYYY-MM-DD | ...'."
+    symbol_name, period_spec = parts[0].strip(), parts[1]
+
+    try:
+        periods = _parse_periods(period_spec)
+    except ValueError as e:
+        return str(e)
+    if not periods:
+        return "No periods given -- format is 'SYMBOL | Label:YYYY-MM-DD:YYYY-MM-DD | ...'."
+    if len(periods) > MAX_CHART_PERIODS:
+        return f"Too many periods (max {MAX_CHART_PERIODS}) -- try comparing fewer at once."
+
+    symbol = _resolve_symbol(symbol_name)
+    overall_start = min(p[1] for p in periods)
+    overall_end = max(p[2] for p in periods)
+    points = _fetch_daily_closes(
+        symbol,
+        int(datetime.datetime.combine(overall_start, datetime.time.min, tzinfo=datetime.timezone.utc).timestamp()),
+        int(datetime.datetime.combine(overall_end + datetime.timedelta(days=1), datetime.time.min, tzinfo=datetime.timezone.utc).timestamp()),
+    )
+    if not points:
+        return f"Couldn't fetch historical data for '{symbol_name}' ({symbol}) -- check the symbol and try again."
+
+    lines = [f"{symbol_name} ({symbol}) performance by period:"]
+    chart_data = []
+    for label, start, end in periods:
+        start_point = next((p for p in points if p[0] >= start), None)
+        end_point = next((p for p in reversed(points) if p[0] <= end), None)
+        if not start_point or not end_point or start_point[0] > end_point[0]:
+            lines.append(f"- {label}: no trading data available in that range.")
+            continue
+        pct_change = (end_point[1] - start_point[1]) / start_point[1] * 100
+        lines.append(
+            f"- {label} ({start_point[0]} to {end_point[0]}): "
+            f"{start_point[1]:.2f} -> {end_point[1]:.2f} ({pct_change:+.1f}%)"
+        )
+        chart_data.append((label, pct_change))
+
+    if not chart_data:
+        return "\n".join(lines) + "\n\nNo valid data available to chart."
+
+    chart_path = _render_bar_chart(f"{symbol_name} % change by period", chart_data)
+    lines.append(f"\nCHART_PATH: {chart_path}")
+    return "\n".join(lines)
 
 
 # A restricted arithmetic evaluator for the calculate() tool -- walks the

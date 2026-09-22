@@ -363,9 +363,25 @@ def run_discord_bot():
                 loop,
             )
 
-        result = await asyncio.to_thread(llmask.ask, message, conversation_id, on_queued, ctx.author.id)
+        result, chart_path = await asyncio.to_thread(llmask.ask, message, conversation_id, on_queued, ctx.author.id)
         chunks = llmask.chunk_response(result)
-        await thinking_message.edit(embed=_embed(_with_question(question_line, chunks[0])))
+
+        first_embed = _embed(_with_question(question_line, chunks[0]))
+        if chart_path:
+            # A locally-rendered chart has no public URL to point an embed
+            # at -- attach the file itself and reference it via Discord's
+            # attachment:// scheme instead, then drop the local temp file
+            # now that Discord has its own copy.
+            filename = os.path.basename(chart_path)
+            first_embed.set_image(url=f"attachment://{filename}")
+            await thinking_message.edit(embed=first_embed, attachments=[discord.File(chart_path, filename=filename)])
+            try:
+                os.remove(chart_path)
+            except OSError:
+                pass
+        else:
+            await thinking_message.edit(embed=first_embed)
+
         for chunk in chunks[1:]:
             await ctx.send(embed=_embed(chunk))
 

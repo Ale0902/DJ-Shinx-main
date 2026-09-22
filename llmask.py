@@ -78,13 +78,30 @@ def forget(conversation_id) -> None:
 # `tools` is even present. This prompts the model to request a tool by
 # writing a specific line of text instead, which works with any chat model
 # regardless of native tool-calling support.
-TOOL_CALL_RE = re.compile(r'TOOL_CALL:\s*(\w+)\(\s*["\']([^"\']*)["\']\s*\)')
+#
+# Group 2 backreferences the opening quote (\2) rather than banning quote
+# characters from the argument outright -- an argument with an apostrophe
+# in it (e.g. a "Biden's Term" chart label) would otherwise fail to match
+# at all, silently breaking tool-call detection and leaking the raw
+# TOOL_CALL: ... text into the user-facing answer instead. Greedy '.*'
+# backtracks to the *last* matching-quote-before-close, so this still
+# works even for a single-quoted argument that itself contains an
+# apostrophe.
+TOOL_CALL_RE = re.compile(r'TOOL_CALL:\s*(\w+)\(\s*(["\'])(.*)\2\s*\)')
 
 # For verifying the model's final "Source: <url>" citation against URLs it
 # actually saw from a tool this turn, rather than trusting it not to cite
 # something recalled from memory (it has, more than once).
 URL_RE = re.compile(r'https?://\S+')
 SOURCE_LINE_RE = re.compile(r'^Source:\s*(\S+)\s*$', re.MULTILINE)
+
+# compare_stock_performance (mcp_web_server.py) renders a chart to a local
+# PNG and tags its path with this marker in the tool result text -- pulled
+# out here into its own side channel (not left for the model to repeat
+# back verbatim in its final answer, which would be an unnecessary and
+# fragile way to get a filesystem path in front of bot.py) so it can be
+# returned up to bot.py to attach as a real Discord file.
+CHART_PATH_RE = re.compile(r'^CHART_PATH:\s*(.+?)\s*$', re.MULTILINE)
 
 
 def _extract_urls(text: str) -> set[str]:
@@ -350,7 +367,21 @@ def _build_system_prompt(
         "paraphrased or shortened -- Discord displays that image inline "
         "automatically, so you ARE able to show it. Don't say you're "
         "unable to provide images when a tool result actually gave you a "
-        "direct image_url to use."
+        "direct image_url to use.\n\n"
+        "If asked to compare or describe how a stock or index has "
+        "performed over specific named periods (e.g. a president's term, "
+        "a particular year), call compare_stock_performance yourself "
+        "with this exact format: \"SYMBOL | Label:YYYY-MM-DD:YYYY-MM-DD | "
+        "Label:YYYY-MM-DD:YYYY-MM-DD\" -- for example \"S&P 500 | Trump "
+        "Term 1:2017-01-20:2021-01-19 | Biden Term:2021-01-20:2025-01-19\". "
+        "Use well-known public dates (like inauguration dates) for the "
+        "period boundaries, but never invent or estimate the percentage "
+        "change itself -- this tool computes it from real market data, "
+        "which is more reliable than whatever a general web search result "
+        "happens to say, so trust it over that if the two disagree. "
+        "Don't use apostrophes in labels (write \"Biden Term\", not "
+        "\"Biden's Term\"). It already renders a chart, so just summarize "
+        "what it found -- don't add a 'Source:' line for it."
     )
     return system_prompt, tool_param
 
@@ -366,7 +397,7 @@ REMEMBER_FACT_DESCRIPTION = (
 async def _ask_with_tools(
     question: str, history: list[dict], prior_urls: set[str], ollama_url: str, ollama_model: str,
     on_queued=None, user_id=None,
-) -> tuple[str, set[str]]:
+) -> tuple[str, set[str], str | None]:
     """Runs the question through Ollama, always searching first rather
     than leaving that decision to the model -- model-judgment triggering
     was tried and repeatedly failed (it kept answering current-events-
@@ -389,11 +420,13 @@ async def _ask_with_tools(
     through the MCP subprocess, since it needs this same user_id) to save
     new ones -- both skipped entirely if user_id is None.
 
-    Returns (answer, seen_urls) -- the caller merges seen_urls into the
-    conversation's remembered sources for future turns. Spawns
-    mcp_web_server.py fresh as a stdio subprocess for the duration of this
-    call -- simplest option given /chat's traffic doesn't need a
-    persistent connection."""
+    Returns (answer, seen_urls, chart_path) -- the caller merges seen_urls
+    into the conversation's remembered sources for future turns, and
+    forwards chart_path (the PNG compare_stock_performance rendered, if
+    any this turn) up to bot.py to attach as a real Discord file, deleting
+    the local copy once sent. Spawns mcp_web_server.py fresh as a stdio
+    subprocess for the duration of this call -- simplest option given
+    /chat's traffic doesn't need a persistent connection."""
     server_params = StdioServerParameters(command=sys.executable, args=[MCP_SERVER_SCRIPT])
 
     async with stdio_client(server_params) as (read, write):
@@ -405,6 +438,7 @@ async def _ask_with_tools(
             system_prompt, tool_param = _build_system_prompt(mcp_tools, _wants_full_list(question), extra_tools)
 
             seen_urls: set[str] = set(prior_urls)
+            chart_path: str | None = None
 
             initial_tool = 'image_search' if _wants_image(question) else 'web_search'
             try:
@@ -483,11 +517,11 @@ async def _ask_with_tools(
                         })
                         continue
 
-                    return _verify_citation(content, seen_urls), seen_urls
+                    return _verify_citation(content, seen_urls), seen_urls, chart_path
 
                 messages.append({'role': 'assistant', 'content': content})
 
-                name, arg = match.group(1), match.group(2)
+                name, arg = match.group(1), match.group(3)
 
                 if name == 'remember_fact' and user_id is not None:
                     # Handled locally, not via the MCP subprocess -- it
@@ -507,6 +541,10 @@ async def _ask_with_tools(
                         seen_urls |= _extract_urls(result_text)
                         if param_name == 'url':
                             seen_urls.add(arg)
+                        chart_match = CHART_PATH_RE.search(result_text)
+                        if chart_match:
+                            chart_path = chart_match.group(1)
+                            result_text = CHART_PATH_RE.sub('', result_text).rstrip()
 
                 messages.append({
                     'role': 'user',
@@ -524,13 +562,16 @@ async def _ask_with_tools(
                     ),
                 })
 
-            return "I looked into that but couldn't settle on a final answer in time -- try asking again.", seen_urls
+            return "I looked into that but couldn't settle on a final answer in time -- try asking again.", seen_urls, chart_path
 
 
-def ask(question: str, conversation_id=None, on_queued=None, user_id=None) -> str:
+def ask(question: str, conversation_id=None, on_queued=None, user_id=None) -> tuple[str, str | None]:
     """Sends a question to the Ollama LLM, letting it call the web_search
     and fetch_page tools (served by mcp_web_server.py) when it needs
-    current information, and returns its final reply as a string.
+    current information, and returns (reply, chart_path) -- chart_path is
+    the local PNG path compare_stock_performance rendered this turn, if
+    any, or None. The caller (bot.py) attaches it as a Discord file and
+    deletes the local copy once sent.
 
     The reply only includes a "Source: <url>" citation if this message
     itself asks for one (e.g. "what's your source", "give me a link") --
@@ -556,7 +597,7 @@ def ask(question: str, conversation_id=None, on_queued=None, user_id=None) -> st
     ollama_model = os.getenv('OLLAMA_MODEL', 'gemma3:4b')
     history, prior_urls = _get_conversation(conversation_id) if conversation_id is not None else ([], set())
     try:
-        full_answer, seen_urls = asyncio.run(
+        full_answer, seen_urls, chart_path = asyncio.run(
             _ask_with_tools(question, history, prior_urls, ollama_url, ollama_model, on_queued, user_id)
         )
         full_answer = full_answer or "DJ Shinx's brain came back empty. Try rephrasing that."
@@ -569,18 +610,18 @@ def ask(question: str, conversation_id=None, on_queued=None, user_id=None) -> st
                 {'role': 'assistant', 'content': full_answer},
             ]
             _save_conversation(conversation_id, updated_history, prior_urls | seen_urls)
-        return displayed_answer
+        return displayed_answer, chart_path
     except requests.exceptions.ConnectionError:
-        return "Couldn't reach the LLM — is Ollama running on the VM and reachable from here?"
+        return "Couldn't reach the LLM — is Ollama running on the VM and reachable from here?", None
     except requests.exceptions.Timeout:
-        return "The LLM took too long to respond. Try a shorter question."
+        return "The LLM took too long to respond. Try a shorter question.", None
     except requests.exceptions.RequestException as e:
         logger.warning(f"ask() request failed: {e}")
-        return f"Something went wrong talking to the LLM: {e}"
+        return f"Something went wrong talking to the LLM: {e}", None
     except Exception as e:
         detail = _describe_exception(e)
         logger.warning(f"ask() failed: {detail}")
-        return f"Something went wrong talking to the LLM: {detail}"
+        return f"Something went wrong talking to the LLM: {detail}", None
 
 
 def chunk_response(text: str, size: int = MAX_DISCORD_LEN):
