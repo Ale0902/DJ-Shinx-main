@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands, tasks
 import asyncio
+import contextlib
 import datetime
 import logging
 import re
@@ -344,18 +345,38 @@ def run_discord_bot():
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def chat(ctx: commands.Context, *, message: str):
         question_line = f"**From {ctx.author.display_name}:** {message}"
-        thinking_message = await ctx.send(embed=_embed(_with_question(question_line, "🧠 Thinking...")))
+        thinking_message = await ctx.send(embed=_embed(_with_question(question_line, "🧠 Thinking")))
         conversation_id = (ctx.channel.id, ctx.author.id)
 
-        loop = asyncio.get_running_loop()
+        # llmask.ask() runs in a worker thread and calls on_status from
+        # there -- it just records the latest label, rather than editing
+        # Discord directly, since the actual edits (and the animated dots)
+        # are driven by _animate_thinking below on the main event loop.
+        status = {'label': "🧠 Thinking"}
 
         def on_status(text: str):
-            asyncio.run_coroutine_threadsafe(
-                thinking_message.edit(embed=_embed(_with_question(question_line, text))),
-                loop,
-            )
+            status['label'] = text.rstrip('.')
 
-        result, chart_path = await asyncio.to_thread(llmask.ask, message, conversation_id, on_status, ctx.author.id)
+        async def animate_thinking():
+            dots = 0
+            while True:
+                await asyncio.sleep(1.5)
+                dots = dots % 3 + 1
+                try:
+                    await thinking_message.edit(
+                        embed=_embed(_with_question(question_line, status['label'] + '.' * dots))
+                    )
+                except discord.HTTPException:
+                    pass
+
+        animation_task = asyncio.create_task(animate_thinking())
+        try:
+            result, chart_path = await asyncio.to_thread(llmask.ask, message, conversation_id, on_status, ctx.author.id)
+        finally:
+            animation_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await animation_task
+
         chunks = llmask.chunk_response(result)
 
         first_embed = _embed(_with_question(question_line, chunks[0]))
