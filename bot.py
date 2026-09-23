@@ -93,6 +93,17 @@ def _embed(text: str) -> discord.Embed:
         e.set_image(url=image_match.group(0))
     return e
 
+
+async def _send_announcement(destination, message: str):
+    """Sends an embed, then re-posts any link in it as plain content so
+    Discord actually unfurls it into a preview card (a link inside an
+    embed's description never unfurls). destination can be a channel or
+    a command Context -- both expose a compatible .send()."""
+    await destination.send(embed=_embed(message))
+    url_match = ANNOUNCEMENT_URL_RE.search(message)
+    if url_match:
+        await destination.send(url_match.group(0))
+
 # Commands that work normally but are left out of /help entirely -- easter
 # eggs that only show up if you already know about them.
 HIDDEN_COMMANDS = {'vini'}
@@ -291,13 +302,13 @@ def run_discord_bot():
     async def recsong(ctx: commands.Context):
         await ctx.defer()
         result = await asyncio.to_thread(bf.recsongs)
-        await ctx.send(embed=_embed(result))
+        await _send_announcement(ctx, result)
 
     @client.hybrid_command(name="top5songs", description="Top 5 songs on iTunes charts!")
     async def top5(ctx: commands.Context):
         await ctx.defer()
         result = await asyncio.to_thread(bf.topsongs)
-        await ctx.send(embed=_embed(result))
+        await _send_announcement(ctx, result)
 
     @client.hybrid_command(name='rolld6', description='Rolls a D6 dice')
     async def rolld6(ctx: commands.Context):
@@ -587,7 +598,7 @@ def run_discord_bot():
     @tasks.loop(time=datetime.time(hour=13, minute=0, tzinfo=EASTERN))
     async def sotd():
         result = await asyncio.to_thread(bf.recsongs)
-        await _broadcast('sotd', lambda channel: channel.send(embed=_embed(result)))
+        await _broadcast('sotd', lambda channel: _send_announcement(channel, result))
 
     @tasks.loop(hours=6.0)
     async def new_chapter_announcements():
@@ -598,9 +609,9 @@ def run_discord_bot():
 
         async def send(channel):
             if berserk_announcement:
-                await channel.send(embed=_embed(berserk_announcement))
+                await _send_announcement(channel, berserk_announcement)
             if batman_announcement:
-                await channel.send(embed=_embed(batman_announcement))
+                await _send_announcement(channel, batman_announcement)
 
         await _broadcast('manga_comics', send)
 
@@ -615,16 +626,6 @@ def run_discord_bot():
                 await channel.send(embed=_embed(message))
 
         await _broadcast('f1_updates', send)
-
-    async def _send_announcement(channel, message):
-        """Sends an announcement embed, then re-posts its link as plain
-        content so Discord actually unfurls it into a preview card (see
-        ANNOUNCEMENT_URL_RE above -- a link inside an embed never
-        unfurls)."""
-        await channel.send(embed=_embed(message))
-        url_match = ANNOUNCEMENT_URL_RE.search(message)
-        if url_match:
-            await channel.send(url_match.group(0))
 
     @tasks.loop(minutes=30.0)
     async def game_announcements():
@@ -675,7 +676,7 @@ def run_discord_bot():
 
         async def send(channel):
             for message in messages:
-                await channel.send(embed=_embed(message))
+                await _send_announcement(channel, message)
 
         await _broadcast('steam_sales', send)
 
