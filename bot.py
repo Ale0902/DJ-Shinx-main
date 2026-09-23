@@ -8,6 +8,7 @@ import re
 from zoneinfo import ZoneInfo
 import responses
 import botFunctions as bf
+import channel_config
 import llmask
 import memory_db
 import sports
@@ -105,6 +106,7 @@ COMMAND_CATEGORIES = {
     'coin_flip': 'Fun',
     '8ball': 'Fun',
     'mcstatus': 'Other',
+    'setchannel': 'Other',
     'chat': 'AI',
     'forget': 'AI',
     'forgetme': 'AI',
@@ -340,6 +342,39 @@ def run_discord_bot():
         result = await asyncio.to_thread(bf.mc_status)
         await ctx.send(embed=_embed(result))
 
+    @client.hybrid_command(name="setchannel", description="Choose which channel an announcement feature posts into")
+    @discord.app_commands.describe(
+        feature="Which announcement feature to configure",
+        channel="The channel it should post into",
+    )
+    @discord.app_commands.choices(feature=[
+        discord.app_commands.Choice(name=label, value=key)
+        for key, label in channel_config.FEATURES.items()
+    ])
+    @commands.guild_only()
+    @commands.has_permissions(manage_guild=True)
+    async def setchannel(ctx: commands.Context, feature: str, channel: discord.TextChannel):
+        # app_commands.choices only restricts the slash-command picker --
+        # the !text path takes feature as a plain string, so this is
+        # re-checked here regardless of how the command was invoked.
+        if feature not in channel_config.FEATURES:
+            valid = ", ".join(channel_config.FEATURES)
+            await ctx.send(embed=_embed(f"Unknown feature '{feature}'. Valid options: {valid}"))
+            return
+
+        channel_config.set_channel(ctx.guild.id, feature, channel.id)
+        label = channel_config.FEATURES[feature]
+        await ctx.send(embed=_embed(f"✅ **{label}** will now post in {channel.mention}."))
+
+    @setchannel.error
+    async def setchannel_error(ctx: commands.Context, error: commands.CommandError):
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.send(embed=_embed("You need the Manage Server permission to do that."), ephemeral=True)
+        elif isinstance(error, commands.NoPrivateMessage):
+            await ctx.send(embed=_embed("This can only be used in a server, not a DM."), ephemeral=True)
+        else:
+            raise error
+
     @client.hybrid_command(name="chat", description="Chat with DJ Shinx's AI brain")
     @discord.app_commands.describe(message="What do you want to say?")
     @commands.cooldown(1, 5, commands.BucketType.user)
@@ -457,35 +492,47 @@ def run_discord_bot():
 
  #=========================--END COMMANDS--===================================#
 
+    async def _broadcast(feature: str, send):
+        """Calls send(channel) for every channel configured for this
+        feature (via /setchannel) across every guild the bot is in, so a
+        single result gets fanned out to everyone who's opted in instead
+        of one hardcoded destination."""
+        for channel_id in channel_config.get_all_for_feature(feature).values():
+            channel = client.get_channel(channel_id)
+            if channel is not None:
+                await send(channel)
+
     @tasks.loop(time=datetime.time(hour=13, minute=0, tzinfo=EASTERN))
     async def sotd():
-        channel = client.get_channel(1023430299335532615)
         result = await asyncio.to_thread(bf.recsongs)
-        await channel.send(embed=_embed(result))
+        await _broadcast('sotd', lambda channel: channel.send(embed=_embed(result)))
 
     @tasks.loop(hours=6.0)
     async def new_chapter_announcements():
-        channel = client.get_channel(748287973795168346)
-        if channel is None:
+        berserk_announcement = await asyncio.to_thread(bf.check_berserk_release)
+        batman_announcement = await asyncio.to_thread(bf.check_absolute_batman_release)
+        if not berserk_announcement and not batman_announcement:
             return
 
-        berserk_announcement = await asyncio.to_thread(bf.check_berserk_release)
-        if berserk_announcement:
-            await channel.send(embed=_embed(berserk_announcement))
+        async def send(channel):
+            if berserk_announcement:
+                await channel.send(embed=_embed(berserk_announcement))
+            if batman_announcement:
+                await channel.send(embed=_embed(batman_announcement))
 
-        batman_announcement = await asyncio.to_thread(bf.check_absolute_batman_release)
-        if batman_announcement:
-            await channel.send(embed=_embed(batman_announcement))
+        await _broadcast('manga_comics', send)
 
     @tasks.loop(minutes=15.0)
     async def f1_updates():
-        channel = client.get_channel(1510340061026058472)
-        if channel is None:
+        messages = await asyncio.to_thread(f1.check_f1_updates)
+        if not messages:
             return
 
-        messages = await asyncio.to_thread(f1.check_f1_updates)
-        for message in messages:
-            await channel.send(embed=_embed(message))
+        async def send(channel):
+            for message in messages:
+                await channel.send(embed=_embed(message))
+
+        await _broadcast('f1_updates', send)
 
     @client.event
     async def on_ready():
