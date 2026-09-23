@@ -24,6 +24,9 @@ import json
 import requests
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
+from bs4 import BeautifulSoup
+
+import llmask
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE, 'game_news_state.json')
@@ -33,6 +36,24 @@ PLAYSTATION_BLOG_FEED_URL = 'https://blog.playstation.com/feed/'
 
 NINTENDO_DIRECT_RE = re.compile(r'nintendo direct', re.IGNORECASE)
 STATE_OF_PLAY_RE = re.compile(r'state of play', re.IGNORECASE)
+
+# Both sites consistently state the exact broadcast date/time somewhere in
+# the announcement text -- confirmed against real articles (Nintendo Life:
+# "It will take place on Tuesday, 4th August 2026 at 3pm BST"; PlayStation
+# Blog: "Watch ... live on September 3 starting at 6:00am PT / 9:00am
+# ET..."). The two sources (and even different articles on the same site)
+# phrase this differently enough that a fixed regex would be fragile and
+# go stale -- this only runs once per genuinely new announcement (not a
+# hot path), so asking the already-running local LLM to pull it out is a
+# better fit than hand-rolling date-parsing regex.
+BROADCAST_TIME_PROMPT = (
+    "This is a gaming news snippet announcing an upcoming Nintendo Direct or "
+    "PlayStation State of Play broadcast. Reply with ONLY the exact date and "
+    "time it airs, as a short human-readable string with one timezone, e.g. "
+    "'Thursday, September 3, 2026 at 9am ET'. If several timezones are "
+    "listed, just pick one reasonable one. If no specific date or time is "
+    "stated, reply with exactly: unknown\n\nText: {text}"
+)
 
 
 def _load_state():
@@ -48,13 +69,12 @@ def _save_state(state):
 
 
 def _fetch_rss_posts(url: str):
-    """Returns [(guid, title, url, published), ...] from a standard RSS
-    2.0 feed, newest first -- shared by both sources below, which are
-    both plain RSS blogs/news feeds. published is the item's pubDate as a
-    datetime.date, or None if it's missing/unparseable -- this is the
-    article's publish date, not necessarily the exact date the Direct/
-    State of Play itself airs (that'd need parsing freeform article
-    title text, which isn't reliably present or consistently formatted)."""
+    """Returns [(guid, title, link, published, description), ...] from a
+    standard RSS 2.0 feed, newest first -- shared by both sources below,
+    which are both plain RSS blogs/news feeds. published is the item's
+    pubDate as a datetime.date, or None if missing/unparseable --  this
+    is the article's publish date, used only as a fallback if the LLM
+    can't pull an exact broadcast date/time out of the description."""
     response = requests.get(url, timeout=10)
     response.raise_for_status()
     root = ET.fromstring(response.text)
@@ -65,12 +85,13 @@ def _fetch_rss_posts(url: str):
         title = item.findtext('title') or ''
         link = item.findtext('link') or ''
         guid = item.findtext('guid') or link
+        description = item.findtext('description') or ''
         pub_date_text = item.findtext('pubDate')
         try:
             published = parsedate_to_datetime(pub_date_text).date() if pub_date_text else None
         except (TypeError, ValueError):
             published = None
-        posts.append((guid, title, link, published))
+        posts.append((guid, title, link, published, description))
     return posts
 
 
@@ -78,6 +99,19 @@ def _format_date(date) -> str:
     if date is None:
         return "date unknown"
     return date.strftime('%B %d, %Y').replace(' 0', ' ', 1)
+
+
+def _broadcast_time(description_html: str, published) -> str:
+    """Returns a human-readable broadcast date/time, extracted from the
+    announcement's own text by the LLM, falling back to the article's
+    publish date if that fails for any reason (Ollama unreachable, no
+    date actually stated, an unparseable reply, etc.)."""
+    text = BeautifulSoup(description_html, 'html.parser').get_text(' ', strip=True)
+    if text:
+        answer = llmask.quick_query(BROADCAST_TIME_PROMPT.format(text=text[:3000]))
+        if answer and not answer.strip().lower().startswith('unknown'):
+            return answer.strip()
+    return _format_date(published)
 
 
 def check_nintendo_direct():
@@ -93,7 +127,7 @@ def check_nintendo_direct():
     direct = next((p for p in posts if NINTENDO_DIRECT_RE.search(p[1])), None)
     if not direct:
         return None
-    guid, title, url, published = direct
+    guid, title, url, published, description = direct
 
     state = _load_state()
     previous = state.get('nintendo_direct_guid')
@@ -105,7 +139,7 @@ def check_nintendo_direct():
     if previous is None:
         return None
 
-    return f"🎮 **NINTENDO DIRECT ALERT! ({_format_date(published)})**\nRead more: {url}"
+    return f"🎮 **NINTENDO DIRECT ALERT! ({_broadcast_time(description, published)})**\nRead more: {url}"
 
 
 def check_state_of_play():
@@ -120,7 +154,7 @@ def check_state_of_play():
     sop = next((p for p in posts if STATE_OF_PLAY_RE.search(p[1])), None)
     if not sop:
         return None
-    guid, title, url, published = sop
+    guid, title, url, published, description = sop
 
     state = _load_state()
     previous = state.get('state_of_play_guid')
@@ -132,7 +166,7 @@ def check_state_of_play():
     if previous is None:
         return None
 
-    return f"🎮 **PLAYSTATION STATE OF PLAY ANNOUNCED! ({_format_date(published)})**\nRead more: {url}"
+    return f"🎮 **PLAYSTATION STATE OF PLAY ANNOUNCED! ({_broadcast_time(description, published)})**\nRead more: {url}"
 
 
 def check_game_announcements():

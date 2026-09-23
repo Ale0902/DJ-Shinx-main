@@ -759,6 +759,30 @@ def ask(question: str, conversation_id=None, on_status=None, user_id=None) -> tu
         return f"Something went wrong talking to the LLM: {detail}", None
 
 
+def quick_query(prompt: str) -> str | None:
+    """A single-shot Ollama call with no conversation history, tools, or
+    system prompt -- for other modules (e.g. game_news.py extracting a
+    broadcast date/time out of an announcement's text) that need one
+    small piece of text pulled out or generated, without pulling in
+    /chat's full tool-calling machinery. Shares /chat's request-
+    serialization lock and num_ctx setting, since the VM's GPUs are
+    already snug on VRAM for one generation at a time. Returns None on
+    any failure (network, timeout, empty response, etc.)."""
+    ollama_url = os.getenv('OLLAMA_URL', 'http://localhost:11434')
+    ollama_model = os.getenv('OLLAMA_MODEL', 'gemma3:4b')
+    try:
+        ollama_num_ctx = int(os.getenv('OLLAMA_NUM_CTX', str(DEFAULT_OLLAMA_NUM_CTX)))
+    except ValueError:
+        ollama_num_ctx = DEFAULT_OLLAMA_NUM_CTX
+
+    try:
+        data = _ollama_chat([{'role': 'user', 'content': prompt}], ollama_url, ollama_model, ollama_num_ctx)
+        return (data.get('message', {}).get('content') or '').strip() or None
+    except Exception as e:
+        logger.warning(f"quick_query() failed: {_describe_exception(e)}")
+        return None
+
+
 def chunk_response(text: str, size: int = MAX_DISCORD_LEN):
     """Splits a long reply into Discord-message-sized chunks."""
     return [text[i:i + size] for i in range(0, len(text), size)] or ['']
