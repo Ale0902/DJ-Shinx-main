@@ -179,6 +179,81 @@ class PaginatorView(discord.ui.View):
                 pass
 
 
+class _SetChannelFeatureSelect(discord.ui.Select):
+    """Step 1 of /setchannel: pick which feature to configure."""
+
+    def __init__(self, parent_view: "SetChannelView"):
+        options = [
+            discord.SelectOption(label=label, value=key)
+            for key, label in channel_config.FEATURES.items()
+        ]
+        super().__init__(placeholder="Step 1: choose a feature to configure...", options=options)
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        self.parent_view.feature = self.values[0]
+        label = channel_config.FEATURES[self.values[0]]
+        self.parent_view.clear_items()
+        self.parent_view.add_item(_SetChannelChannelSelect(self.parent_view))
+        await interaction.response.edit_message(
+            embed=_embed(f"**{label}** selected. Now pick a channel:"),
+            view=self.parent_view,
+        )
+
+
+class _SetChannelChannelSelect(discord.ui.ChannelSelect):
+    """Step 2 of /setchannel: pick the destination channel via Discord's
+    own native channel picker -- no typing or ID-copying required."""
+
+    def __init__(self, parent_view: "SetChannelView"):
+        super().__init__(
+            placeholder="Step 2: choose a channel...",
+            channel_types=[discord.ChannelType.text],
+        )
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        channel = self.values[0]
+        channel_config.set_channel(interaction.guild.id, self.parent_view.feature, channel.id)
+        label = channel_config.FEATURES[self.parent_view.feature]
+        self.parent_view.clear_items()
+        await interaction.response.edit_message(
+            embed=_embed(f"✅ **{label}** will now post in {channel.mention}."),
+            view=self.parent_view,
+        )
+        self.parent_view.stop()
+
+
+class SetChannelView(discord.ui.View):
+    """Backs /setchannel's guided flow: pick a feature from a dropdown,
+    then a channel from a native Discord picker, one step at a time --
+    instead of typing feature and channel as command arguments."""
+
+    def __init__(self, author_id):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.feature: str | None = None
+        self.message: discord.Message | None = None
+        self.add_item(_SetChannelFeatureSelect(self))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "Only the person who ran /setchannel can use this.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
 def run_discord_bot():
     intents = discord.Intents.default()
     intents.message_content = True
@@ -343,28 +418,12 @@ def run_discord_bot():
         await ctx.send(embed=_embed(result))
 
     @client.hybrid_command(name="setchannel", description="Choose which channel an announcement feature posts into")
-    @discord.app_commands.describe(
-        feature="Which announcement feature to configure",
-        channel="The channel it should post into",
-    )
-    @discord.app_commands.choices(feature=[
-        discord.app_commands.Choice(name=label, value=key)
-        for key, label in channel_config.FEATURES.items()
-    ])
     @commands.guild_only()
     @commands.has_permissions(manage_guild=True)
-    async def setchannel(ctx: commands.Context, feature: str, channel: discord.TextChannel):
-        # app_commands.choices only restricts the slash-command picker --
-        # the !text path takes feature as a plain string, so this is
-        # re-checked here regardless of how the command was invoked.
-        if feature not in channel_config.FEATURES:
-            valid = ", ".join(channel_config.FEATURES)
-            await ctx.send(embed=_embed(f"Unknown feature '{feature}'. Valid options: {valid}"))
-            return
-
-        channel_config.set_channel(ctx.guild.id, feature, channel.id)
-        label = channel_config.FEATURES[feature]
-        await ctx.send(embed=_embed(f"✅ **{label}** will now post in {channel.mention}."))
+    async def setchannel(ctx: commands.Context):
+        view = SetChannelView(author_id=ctx.author.id)
+        message = await ctx.send(embed=_embed("Step 1: choose a feature to configure."), view=view)
+        view.message = message
 
     @setchannel.error
     async def setchannel_error(ctx: commands.Context, error: commands.CommandError):
