@@ -466,7 +466,7 @@ def run_discord_bot():
         async def animate_thinking():
             dots = 0
             while True:
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(0.7)
                 dots = dots % 3 + 1
                 try:
                     await thinking_message.edit(
