@@ -463,7 +463,18 @@ def _build_system_prompt(
         "well-known public dates (like inauguration dates) for period "
         "starts. Don't use apostrophes in labels (write \"Biden Term\", "
         "not \"Biden's Term\"). Don't add a 'Source:' line for either "
-        "tool -- it'll be stripped out automatically if you do."
+        "tool -- it'll be stripped out automatically if you do.\n\n"
+        "For a graph/chart request about anything else (not a stock or "
+        "index), use plot_data -- but ONLY with numbers you actually "
+        "found in a tool result this conversation. Never estimate, "
+        "interpolate, or invent a data point to fill a gap or make a "
+        "fuller-looking trend -- this matters even more here than for "
+        "an ordinary factual answer, since a chart visually implies "
+        "precision and completeness that a made-up number would betray. "
+        "If you only found one real number, plot just that single bar -- "
+        "that's correct, not incomplete. If you don't have any real "
+        "numeric data point to plot, say so plainly instead of calling "
+        "plot_data at all."
     )
     return system_prompt, tool_param
 

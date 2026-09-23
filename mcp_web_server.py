@@ -534,6 +534,81 @@ def stock_price_history(query: str) -> str:
     )
 
 
+def _render_generic_bar_chart(title: str, y_label: str, data: list[tuple[str, float]]) -> str:
+    """Renders a labeled bar chart to a PNG under CHARTS_DIR and returns
+    its path. Like _render_bar_chart, but for arbitrary (not necessarily
+    percentage) values with a caller-supplied y-axis label, and no
+    forced +/- sign or 0-line -- those only make sense for a % change
+    comparison, not a general count/measurement."""
+    os.makedirs(CHARTS_DIR, exist_ok=True)
+    labels = [d[0] for d in data]
+    values = [d[1] for d in data]
+
+    fig, ax = plt.subplots(figsize=(7, 4.5), dpi=120)
+    fig.patch.set_facecolor('#313338')
+    ax.set_facecolor('#313338')
+    bars = ax.bar(labels, values, color='#00FFFF')
+    ax.set_ylabel(y_label, color='white')
+    ax.set_title(title, color='white')
+    ax.tick_params(colors='white')
+    for spine in ax.spines.values():
+        spine.set_color('#888888')
+    for bar, value in zip(bars, values):
+        ax.annotate(
+            f'{value:g}',
+            (bar.get_x() + bar.get_width() / 2, bar.get_height()),
+            textcoords="offset points", xytext=(0, 4),
+            ha='center', color='white', fontsize=9,
+        )
+
+    path = os.path.join(CHARTS_DIR, f"{uuid.uuid4().hex}.png")
+    fig.savefig(path, facecolor=fig.get_facecolor(), bbox_inches='tight')
+    plt.close(fig)
+    return path
+
+
+@mcp.tool()
+def plot_data(query: str) -> str:
+    """Renders a labeled bar chart from data points you already have in
+    hand from a tool result this conversation -- never a number you
+    estimated, interpolated, or invented to fill a gap or make a fuller-
+    looking trend. Use this for a "show me a graph/chart of X" request
+    that ISN'T a stock/index (use compare_stock_performance or
+    stock_price_history for those, which pull real market data
+    directly). If you only actually found one real data point, it's
+    fine -- and correct -- to plot just that single bar rather than
+    inventing others. If you don't have any real numeric data point at
+    all, don't call this -- say plainly that you couldn't find the
+    numbers to chart it instead. Format: "Title | Y-axis label |
+    Label1:Value1 | Label2:Value2 | ...", for example "US CS Bachelor's
+    Degrees Awarded | Degrees (thousands) | 2018:79.6 | 2022:104.5"."""
+    parts = query.split('|')
+    if len(parts) < 3:
+        return "Couldn't parse that -- format is 'Title | Y-axis label | Label1:Value1 | Label2:Value2 | ...'."
+    title, y_label = parts[0].strip(), parts[1].strip()
+
+    data = []
+    for segment in parts[2:]:
+        segment = segment.strip()
+        if ':' not in segment:
+            return f"Couldn't parse data point '{segment}' -- expected Label:Value."
+        label, value_str = segment.rsplit(':', 1)
+        try:
+            value = float(value_str.strip())
+        except ValueError:
+            return f"Couldn't parse the number in '{segment}' -- the value must be numeric."
+        data.append((label.strip(), value))
+
+    if not data:
+        return "No data points given -- format is 'Title | Y-axis label | Label1:Value1 | ...'."
+    if len(data) > MAX_CHART_PERIODS:
+        return f"Too many data points (max {MAX_CHART_PERIODS}) -- try plotting fewer at once."
+
+    chart_path = _render_generic_bar_chart(title, y_label, data)
+    point_word = 'point' if len(data) == 1 else 'points'
+    return f"Chart rendered with {len(data)} data {point_word}.\nCHART_PATH: {chart_path}"
+
+
 # A restricted arithmetic evaluator for the calculate() tool -- walks the
 # expression's AST and only permits numbers, basic operators, and a
 # whitelisted set of math functions/constants, rather than using eval()
