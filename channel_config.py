@@ -17,7 +17,8 @@ FEATURES = {
     'sotd': "Song of the Day",
     'manga_comics': "Manga/comic release announcements",
     'f1_updates': "F1 session/race updates",
-    'game_announcements': "Nintendo Direct / State of Play announcements",
+    'game_announcements': "Nintendo Direct / State of Play / Xbox Showcase announcements",
+    'steam_sales': "Steam sales on popular titles",
 }
 
 

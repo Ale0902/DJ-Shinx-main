@@ -4,7 +4,8 @@ __pycache__/
 .env
 release_state.json
 f1_state.json
-game_news_state.json
+game_news.db
+steam_sales_state.json
 memory.db
 channel_config.db
 charts/

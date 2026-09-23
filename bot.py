@@ -13,6 +13,7 @@ import game_news
 import llmask
 import memory_db
 import sports
+import steam_sales
 import f1
 import os
 from dotenv import load_dotenv
@@ -604,6 +605,16 @@ def run_discord_bot():
 
         await _broadcast('f1_updates', send)
 
+    async def _send_announcement(channel, message):
+        """Sends an announcement embed, then re-posts its link as plain
+        content so Discord actually unfurls it into a preview card (see
+        ANNOUNCEMENT_URL_RE above -- a link inside an embed never
+        unfurls)."""
+        await channel.send(embed=_embed(message))
+        url_match = ANNOUNCEMENT_URL_RE.search(message)
+        if url_match:
+            await channel.send(url_match.group(0))
+
     @tasks.loop(minutes=30.0)
     async def game_announcements():
         messages = await asyncio.to_thread(game_news.check_game_announcements)
@@ -612,15 +623,50 @@ def run_discord_bot():
 
         async def send(channel):
             for message in messages:
-                await channel.send(embed=_embed(message))
-                # The embed's own link never unfurls (see ANNOUNCEMENT_URL_RE
-                # above), so re-post it as plain content to get a real
-                # preview card for the article.
-                url_match = ANNOUNCEMENT_URL_RE.search(message)
-                if url_match:
-                    await channel.send(url_match.group(0))
+                await _send_announcement(channel, message)
 
         await _broadcast('game_announcements', send)
+
+    @tasks.loop(minutes=5.0)
+    async def game_reminders():
+        # Runs more often than the other game_news loops so a "30 minutes
+        # before" reminder actually lands close to 30 minutes out, not
+        # off by up to half an hour.
+        due = await asyncio.to_thread(game_news.due_reminders)
+        if not due:
+            return
+
+        async def send(channel):
+            for reminder in due:
+                heading = "Airing in 30 minutes!" if reminder['kind'] == 'thirty_min' else "Airing tomorrow!"
+                message = f"⏰ **{heading}**\n**{reminder['title']}** — {reminder['display_time']}\n{reminder['url']}"
+                await _send_announcement(channel, message)
+
+        await _broadcast('game_announcements', send)
+
+    @tasks.loop(minutes=30.0)
+    async def game_recaps():
+        messages = await asyncio.to_thread(game_news.check_recaps)
+        if not messages:
+            return
+
+        async def send(channel):
+            for message in messages:
+                await _send_announcement(channel, message)
+
+        await _broadcast('game_announcements', send)
+
+    @tasks.loop(minutes=30.0)
+    async def steam_sale_alerts():
+        messages = await asyncio.to_thread(steam_sales.check_steam_sales)
+        if not messages:
+            return
+
+        async def send(channel):
+            for message in messages:
+                await channel.send(embed=_embed(message))
+
+        await _broadcast('steam_sales', send)
 
     @client.event
     async def on_ready():
@@ -628,6 +674,9 @@ def run_discord_bot():
         new_chapter_announcements.start()
         f1_updates.start()
         game_announcements.start()
+        game_reminders.start()
+        game_recaps.start()
+        steam_sale_alerts.start()
         logger.info(f'{client.user} is now running!')
         await client.tree.sync()
 
