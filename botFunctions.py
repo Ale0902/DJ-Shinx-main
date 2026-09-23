@@ -72,7 +72,7 @@ def eightball() -> str:
 
 
 def mc_status() -> str:
-    server_ip = 'listened-refried.tun.ply.gg'
+    server_ip = 'laurel-drink.tun.ply.gg'
     try:
         server = JavaServer.lookup(server_ip, timeout=5)
         status = server.status()
