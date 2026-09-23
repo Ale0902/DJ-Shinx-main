@@ -45,6 +45,14 @@ RICH_PREVIEW_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Same "re-post as plain content so Discord actually unfurls it" idea as
+# RICH_PREVIEW_URL_RE, but unscoped to specific sites -- game_news.py's
+# announcement links are always a Nintendo Life or PlayStation Blog article
+# (never YouTube/Twitter), and any well-formed news article has its own
+# Open Graph preview card, so there's no need to special-case a domain list
+# the way the native YouTube/tweet embeds above require.
+ANNOUNCEMENT_URL_RE = re.compile(r'https?://\S+')
+
 MAX_EMBED_DESC = 4096  # Discord's hard cap on an embed description
 
 
@@ -605,6 +613,12 @@ def run_discord_bot():
         async def send(channel):
             for message in messages:
                 await channel.send(embed=_embed(message))
+                # The embed's own link never unfurls (see ANNOUNCEMENT_URL_RE
+                # above), so re-post it as plain content to get a real
+                # preview card for the article.
+                url_match = ANNOUNCEMENT_URL_RE.search(message)
+                if url_match:
+                    await channel.send(url_match.group(0))
 
         await _broadcast('game_announcements', send)
 

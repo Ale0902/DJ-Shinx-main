@@ -1,9 +1,15 @@
 """Checks for newly announced Nintendo Direct and PlayStation State of Play
 broadcasts, backing the /setchannel "game_announcements" feature.
 
-Sources are both official and need no API key:
-- Nintendo of America's YouTube channel RSS feed (a Direct's video/premiere
-  page is what actually signals one's been scheduled).
+Both sources are free, need no API key, and are actual news write-ups of
+the announcement itself (not just a video appearing day-of):
+- Nintendo Life's RSS feed. Nintendo itself has no official RSS (every
+  guessed newsroom/press feed URL 404s), and polling their Twitter/X
+  account isn't viable without a paid API tier (the free tier only
+  covers a bot's own tweets, not reading another account's timeline) --
+  Nintendo Life reliably publishes "Nintendo Direct Confirmed For ..."
+  articles as soon as Nintendo announces one, often before any video
+  exists yet.
 - The PlayStation Blog's RSS feed, which reliably titles these posts
   "State of Play announced ...".
 
@@ -21,11 +27,8 @@ import xml.etree.ElementTree as ET
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE, 'game_news_state.json')
 
-NINTENDO_YOUTUBE_CHANNEL_ID = 'UCGIY_O-8vW4rfX98KlMkvRg'  # Nintendo of America
-NINTENDO_FEED_URL = f'https://www.youtube.com/feeds/videos.xml?channel_id={NINTENDO_YOUTUBE_CHANNEL_ID}'
+NINTENDO_LIFE_FEED_URL = 'https://www.nintendolife.com/feeds/latest'
 PLAYSTATION_BLOG_FEED_URL = 'https://blog.playstation.com/feed/'
-
-ATOM_NS = {'atom': 'http://www.w3.org/2005/Atom', 'yt': 'http://www.youtube.com/xml/schemas/2015'}
 
 NINTENDO_DIRECT_RE = re.compile(r'nintendo direct', re.IGNORECASE)
 STATE_OF_PLAY_RE = re.compile(r'state of play', re.IGNORECASE)
@@ -43,27 +46,11 @@ def _save_state(state):
         json.dump(state, f)
 
 
-def _fetch_nintendo_videos():
-    """Returns [(video_id, title, url), ...] from Nintendo of America's
-    YouTube channel feed, newest first."""
-    response = requests.get(NINTENDO_FEED_URL, timeout=10)
-    response.raise_for_status()
-    root = ET.fromstring(response.text)
-
-    videos = []
-    for entry in root.findall('atom:entry', ATOM_NS):
-        video_id = entry.findtext('yt:videoId', namespaces=ATOM_NS)
-        title = entry.findtext('atom:title', namespaces=ATOM_NS) or ''
-        link_el = entry.find('atom:link', ATOM_NS)
-        url = link_el.get('href') if link_el is not None else f'https://www.youtube.com/watch?v={video_id}'
-        videos.append((video_id, title, url))
-    return videos
-
-
-def _fetch_playstation_posts():
-    """Returns [(guid, title, url), ...] from the PlayStation Blog RSS
-    feed, newest first."""
-    response = requests.get(PLAYSTATION_BLOG_FEED_URL, timeout=10)
+def _fetch_rss_posts(url: str):
+    """Returns [(guid, title, url), ...] from a standard RSS 2.0 feed,
+    newest first -- shared by both sources below, which are both plain
+    RSS blogs/news feeds."""
+    response = requests.get(url, timeout=10)
     response.raise_for_status()
     root = ET.fromstring(response.text)
 
@@ -78,31 +65,31 @@ def _fetch_playstation_posts():
 
 
 def check_nintendo_direct():
-    """Checks for a newly posted Nintendo Direct video on Nintendo of
-    America's YouTube channel. Returns an announcement string if one's
+    """Checks Nintendo Life's RSS feed for a newly published article
+    announcing a Nintendo Direct. Returns an announcement string if one's
     appeared since the last check, or None if there's nothing new (or
     this is the very first check, since there's no prior baseline)."""
     try:
-        videos = _fetch_nintendo_videos()
+        posts = _fetch_rss_posts(NINTENDO_LIFE_FEED_URL)
     except Exception:
         return None
 
-    direct = next((v for v in videos if NINTENDO_DIRECT_RE.search(v[1])), None)
+    direct = next((p for p in posts if NINTENDO_DIRECT_RE.search(p[1])), None)
     if not direct:
         return None
-    video_id, title, url = direct
+    guid, title, url = direct
 
     state = _load_state()
-    previous = state.get('nintendo_direct_video_id')
-    if previous == video_id:
+    previous = state.get('nintendo_direct_guid')
+    if previous == guid:
         return None
 
-    state['nintendo_direct_video_id'] = video_id
+    state['nintendo_direct_guid'] = guid
     _save_state(state)
     if previous is None:
         return None
 
-    return f"🎮 **Nintendo Direct Alert!**\n**{title}**\nWatch here: {url}"
+    return f"🎮 **Nintendo Direct Alert!**\n**{title}**\nRead more: {url}"
 
 
 def check_state_of_play():
@@ -110,7 +97,7 @@ def check_state_of_play():
     announcement. Returns an announcement string if one's appeared since
     the last check, or None (including on the very first check)."""
     try:
-        posts = _fetch_playstation_posts()
+        posts = _fetch_rss_posts(PLAYSTATION_BLOG_FEED_URL)
     except Exception:
         return None
 
