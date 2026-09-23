@@ -23,6 +23,7 @@ import re
 import json
 import requests
 import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE, 'game_news_state.json')
@@ -47,9 +48,13 @@ def _save_state(state):
 
 
 def _fetch_rss_posts(url: str):
-    """Returns [(guid, title, url), ...] from a standard RSS 2.0 feed,
-    newest first -- shared by both sources below, which are both plain
-    RSS blogs/news feeds."""
+    """Returns [(guid, title, url, published), ...] from a standard RSS
+    2.0 feed, newest first -- shared by both sources below, which are
+    both plain RSS blogs/news feeds. published is the item's pubDate as a
+    datetime.date, or None if it's missing/unparseable -- this is the
+    article's publish date, not necessarily the exact date the Direct/
+    State of Play itself airs (that'd need parsing freeform article
+    title text, which isn't reliably present or consistently formatted)."""
     response = requests.get(url, timeout=10)
     response.raise_for_status()
     root = ET.fromstring(response.text)
@@ -60,8 +65,19 @@ def _fetch_rss_posts(url: str):
         title = item.findtext('title') or ''
         link = item.findtext('link') or ''
         guid = item.findtext('guid') or link
-        posts.append((guid, title, link))
+        pub_date_text = item.findtext('pubDate')
+        try:
+            published = parsedate_to_datetime(pub_date_text).date() if pub_date_text else None
+        except (TypeError, ValueError):
+            published = None
+        posts.append((guid, title, link, published))
     return posts
+
+
+def _format_date(date) -> str:
+    if date is None:
+        return "date unknown"
+    return date.strftime('%B %d, %Y').replace(' 0', ' ', 1)
 
 
 def check_nintendo_direct():
@@ -77,7 +93,7 @@ def check_nintendo_direct():
     direct = next((p for p in posts if NINTENDO_DIRECT_RE.search(p[1])), None)
     if not direct:
         return None
-    guid, title, url = direct
+    guid, title, url, published = direct
 
     state = _load_state()
     previous = state.get('nintendo_direct_guid')
@@ -89,7 +105,7 @@ def check_nintendo_direct():
     if previous is None:
         return None
 
-    return f"🎮 **Nintendo Direct Alert!**\n**{title}**\nRead more: {url}"
+    return f"🎮 **NINTENDO DIRECT ALERT! ({_format_date(published)})**\nRead more: {url}"
 
 
 def check_state_of_play():
@@ -104,7 +120,7 @@ def check_state_of_play():
     sop = next((p for p in posts if STATE_OF_PLAY_RE.search(p[1])), None)
     if not sop:
         return None
-    guid, title, url = sop
+    guid, title, url, published = sop
 
     state = _load_state()
     previous = state.get('state_of_play_guid')
@@ -116,7 +132,7 @@ def check_state_of_play():
     if previous is None:
         return None
 
-    return f"🎮 **PlayStation State of Play Announced!**\n**{title}**\nRead more: {url}"
+    return f"🎮 **PLAYSTATION STATE OF PLAY ANNOUNCED! ({_format_date(published)})**\nRead more: {url}"
 
 
 def check_game_announcements():
