@@ -5,6 +5,7 @@ import contextlib
 import datetime
 import logging
 import re
+import time
 from zoneinfo import ZoneInfo
 import responses
 import botFunctions as bf
@@ -69,6 +70,13 @@ def _with_question(question_line: str, body: str) -> str:
     if len(question_line) > available:
         question_line = question_line[:available - 1].rstrip() + "…"
     return f"{question_line}\n\n{body}"
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Formats a /chat response time for the embed footer -- e.g. "2.4s"
+    or "1.3m" for anything a minute or longer, since gemma3 can
+    legitimately take a while on a multi-step tool lookup."""
+    return f"{seconds:.1f}s" if seconds < 60 else f"{seconds / 60:.1f}m"
 
 
 def _embed(text: str) -> discord.Embed:
@@ -476,9 +484,11 @@ def run_discord_bot():
                     pass
 
         animation_task = asyncio.create_task(animate_thinking())
+        start_time = time.monotonic()
         try:
             result, chart_path = await asyncio.to_thread(llmask.ask, message, conversation_id, on_status, ctx.author.id)
         finally:
+            elapsed = time.monotonic() - start_time
             animation_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await animation_task
@@ -486,6 +496,7 @@ def run_discord_bot():
         chunks = llmask.chunk_response(result)
 
         first_embed = _embed(_with_question(question_line, chunks[0]))
+        first_embed.set_footer(text=f"Answered in {_format_elapsed(elapsed)}")
         if chart_path:
             # A locally-rendered chart has no public URL to point an embed
             # at -- attach the file itself and reference it via Discord's
