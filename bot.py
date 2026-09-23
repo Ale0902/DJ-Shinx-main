@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 import responses
 import botFunctions as bf
 import channel_config
+import game_news
 import llmask
 import memory_db
 import sports
@@ -595,11 +596,24 @@ def run_discord_bot():
 
         await _broadcast('f1_updates', send)
 
+    @tasks.loop(minutes=30.0)
+    async def game_announcements():
+        messages = await asyncio.to_thread(game_news.check_game_announcements)
+        if not messages:
+            return
+
+        async def send(channel):
+            for message in messages:
+                await channel.send(embed=_embed(message))
+
+        await _broadcast('game_announcements', send)
+
     @client.event
     async def on_ready():
         sotd.start()
         new_chapter_announcements.start()
         f1_updates.start()
+        game_announcements.start()
         logger.info(f'{client.user} is now running!')
         await client.tree.sync()
 
