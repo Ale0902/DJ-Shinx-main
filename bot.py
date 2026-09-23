@@ -214,7 +214,9 @@ class _SetChannelChannelSelect(discord.ui.ChannelSelect):
 
     async def callback(self, interaction: discord.Interaction):
         channel = self.values[0]
-        channel_config.set_channel(interaction.guild.id, self.parent_view.feature, channel.id)
+        # interaction.guild is a cache lookup and can come back None; guild_id
+        # comes straight off the interaction payload and is always present.
+        channel_config.set_channel(interaction.guild_id, self.parent_view.feature, channel.id)
         label = channel_config.FEATURES[self.parent_view.feature]
         self.parent_view.clear_items()
         await interaction.response.edit_message(
