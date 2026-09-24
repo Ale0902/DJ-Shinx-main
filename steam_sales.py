@@ -66,6 +66,10 @@ MIN_DISCOUNT_PERCENT = 50
 # fifty messages into the channel.
 MAX_INDIVIDUAL_ANNOUNCEMENTS = 5
 
+# Entries per page of /currentsales. Each is one line, so this is about
+# how much someone wants to read at once rather than any Discord limit.
+SALES_PER_PAGE = 15
+
 # Only announce a "gone free" game if it normally costs at least this much
 # (in cents) -- otherwise a $1 indie title going free would be as noisy as
 # a real giveaway of something that's usually $20+.
@@ -257,6 +261,52 @@ def _load_last_seen(state, now: float) -> tuple[dict[str, float], bool]:
     if 'active_sale_ids' in state:
         return {str(sale_id): now for sale_id in state['active_sale_ids']}, False
     return {}, True
+
+
+# Characters that would otherwise be read as formatting inside the
+# markdown link a listing entry wraps each title in -- a game with a
+# bracket in its name would silently break the link.
+_MARKDOWN_SPECIALS = str.maketrans({c: chr(92) + c for c in r'\*_~`[]|'})
+
+
+def _listing_entry(sale: dict) -> str:
+    name = sale['name'].translate(_MARKDOWN_SPECIALS)
+    url = _store_url(sale['id'])
+    original = sale['original_price'] / 100
+    if sale.get('discount_percent') == 100:
+        return f"🎉 **[{name}]({url})** — FREE (normally ${original:.2f})"
+    return (
+        f"**[{name}]({url})** — {sale['discount_percent']}% off · "
+        f"${sale['final_price'] / 100:.2f} (was ${original:.2f})"
+    )
+
+
+def current_sales_pages() -> list[tuple[str, str]]:
+    """(title, body) pages listing every popular title currently on sale,
+    for /currentsales -- the same set check_steam_sales watches, so what
+    the command shows and what the bot announces can't drift apart.
+
+    Read-only on purpose: this deliberately does NOT record anything in
+    the last_seen state. Running the command is browsing, not announcing,
+    and marking these as seen would make the announcer treat a sale it
+    never posted as already handled -- silently suppressing the
+    announcement for whatever happened to be listed.
+    """
+    popular_discounts, free_promos = _fetch_offers()
+    offers = free_promos + sorted(
+        popular_discounts, key=lambda s: s.get('rank', len(popular_discounts))
+    )
+    if not offers:
+        return []
+
+    pages = []
+    total = len(offers)
+    for start in range(0, total, SALES_PER_PAGE):
+        chunk = offers[start:start + SALES_PER_PAGE]
+        heading = f"## 🛒 Popular Steam Sales ({total} right now)"
+        body = heading + "\n\n" + "\n".join(_listing_entry(sale) for sale in chunk)
+        pages.append(("Popular Steam Sales", body))
+    return pages
 
 
 def check_steam_sales() -> list[str]:

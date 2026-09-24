@@ -176,6 +176,7 @@ COMMAND_CATEGORIES = {
     'coin_flip': 'Fun',
     '8ball': 'Fun',
     'mcstatus': 'Other',
+    'currentsales': 'Other',
     'setchannel': 'Other',
     'chat': 'AI',
     'forget': 'AI',
@@ -424,6 +425,19 @@ def run_discord_bot():
             await ctx.send(embed=_embed("No matches scheduled in any tracked competition this week."))
             return
         view = PaginatorView(pages, author_id=ctx.author.id, command_name="soccer")
+        message = await ctx.send(embed=view.embed(), view=view)
+        view.message = message
+
+    @client.hybrid_command(name="currentsales", description="Popular games currently on sale on Steam")
+    async def currentsales(ctx: commands.Context):
+        await ctx.defer()
+        pages = await asyncio.to_thread(steam_sales.current_sales_pages)
+        if not pages:
+            await ctx.send(embed=_embed(
+                "No popular Steam sales going on right now — or Steam isn't answering. Try again later!"
+            ))
+            return
+        view = PaginatorView(pages, author_id=ctx.author.id, command_name="currentsales")
         message = await ctx.send(embed=view.embed(), view=view)
         view.message = message
 
