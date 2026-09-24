@@ -66,7 +66,7 @@ MIN_DISCOUNT_PERCENT = 50
 # fifty messages into the channel.
 MAX_INDIVIDUAL_ANNOUNCEMENTS = 5
 
-# Entries per page of /currentsales. Each is one line, so this is about
+# Entries per page of /steamsales. Each is one line, so this is about
 # how much someone wants to read at once rather than any Discord limit.
 SALES_PER_PAGE = 15
 
@@ -283,7 +283,7 @@ def _listing_entry(sale: dict) -> str:
 
 def current_sales_pages() -> list[tuple[str, str]]:
     """(title, body) pages listing every popular title currently on sale,
-    for /currentsales -- the same set check_steam_sales watches, so what
+    for /steamsales -- the same set check_steam_sales watches, so what
     the command shows and what the bot announces can't drift apart.
 
     Read-only on purpose: this deliberately does NOT record anything in
