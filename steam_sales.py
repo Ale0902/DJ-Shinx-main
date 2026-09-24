@@ -2,11 +2,19 @@
 normally-paid games that have gone temporarily free, backing the
 /setchannel "steam_sales" feature.
 
-Uses Steam's public featuredcategories API (no key needed). "Popular" for
-a regular discount is Steam's own top_sellers list intersected with the
-specials list, rather than a hand-maintained title list or a big-discount
-heuristic -- so this can't misfire announcing some obscure game just
-because it happens to be steeply discounted.
+Popular discounts come from Steam's store search, asked for the titles
+that are both currently on special and ranked by top sellers, so
+"popular" is Steam's own ranking rather than a hand-maintained title list
+or a big-discount heuristic that would misfire on some obscure game.
+
+That replaced featuredcategories, which is what this used to read for
+them and which quietly made the whole feature near-useless: it returns
+ten specials and ten top sellers, and "popular discount" was their
+intersection -- two small rotating windows that mostly don't overlap, so
+the answer was usually nothing at all. An entire Persona series sale
+(Persona 3 Reload at 70% off ranked 14th among top-selling specials,
+Persona 5 Royal 30th, Metaphor: ReFantazio 28th) went unannounced that
+way, while the search ranking had 1757 discounted games to draw from.
 
 A free promo (100% off) can't use that same top_sellers filter -- it
 generates zero revenue, so it never appears in a revenue-ranked
@@ -28,15 +36,35 @@ REANNOUNCE_AFTER_DAYS -- long enough that rotation gaps stay quiet, short
 enough that a genuinely separate sale months later still gets announced.
 """
 import os
+import re
 import json
 import time
+import html
 import requests
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE, 'steam_sales_state.json')
 
 FEATURED_URL = 'https://store.steampowered.com/api/featuredcategories'
+SEARCH_URL = 'https://store.steampowered.com/search/results/'
 USER_AGENT = "DJ-Shinx-Bot/1.0 (+https://github.com/Ale0902/DJ-Shinx-main)"
+
+# How far down Steam's "top sellers that are currently on special"
+# ranking still counts as a popular title. The tail is long (1757
+# discounted games the day this was written) and almost all of it is
+# stuff nobody asked about.
+POPULAR_RANK_DEPTH = 100
+
+# A token 10-15% cut isn't news. Every Persona title in the sale that
+# prompted this was 50-70% off.
+MIN_DISCOUNT_PERCENT = 50
+
+# A seasonal sale flips dozens of popular titles on at once -- 55 of the
+# top 100 were at or past MIN_DISCOUNT_PERCENT the day this was written.
+# Post the steepest few on their own (so each still gets its store-page
+# preview) and roll the remainder into a single line rather than firing
+# fifty messages into the channel.
+MAX_INDIVIDUAL_ANNOUNCEMENTS = 5
 
 # Only announce a "gone free" game if it normally costs at least this much
 # (in cents) -- otherwise a $1 indie title going free would be as noisy as
@@ -63,32 +91,124 @@ def _save_state(state):
         json.dump(state, f)
 
 
-def _fetch_offers():
-    """Returns (popular_discounts, free_promos) from Steam's currently
-    featured specials."""
+# Steam's search endpoint answers with a blob of rendered HTML rather
+# than structured items, but every field needed is in a machine-readable
+# attribute rather than in the prose, so this reads those instead of
+# trying to interpret the markup's shape. A row that's missing any of
+# them is skipped rather than guessed at.
+_ROW_RE = re.compile(r'data-ds-appid="(\d+)"(.*?)(?=data-ds-appid="|\Z)', re.S)
+_TITLE_RE = re.compile(r'<span class="title">(.*?)</span>', re.S)
+_DISCOUNT_RE = re.compile(r'data-discount="(\d+)"')
+_FINAL_PRICE_RE = re.compile(r'data-price-final="(\d+)"')
+_ORIGINAL_PRICE_RE = re.compile(r'discount_original_price">([^<]+)<')
+
+
+def _price_to_cents(text: str) -> int | None:
+    """"$59.99" -> 5999. Returns None for anything that isn't a plain
+    amount ("Free", a range, an empty string), so the caller can drop the
+    row instead of announcing a nonsense price."""
+    digits = re.sub(r'[^\d.]', '', text or '')
+    if not digits or digits.count('.') > 1:
+        return None
+    try:
+        return round(float(digits) * 100)
+    except ValueError:
+        return None
+
+
+def _parse_search_rows(results_html: str) -> list[dict]:
+    """Normalizes search rows into the same shape featuredcategories uses
+    for its items, so both sources feed the rest of this module
+    unchanged."""
+    offers = []
+    for rank, match in enumerate(_ROW_RE.finditer(results_html)):
+        app_id, body = match.group(1), match.group(2)
+
+        title = _TITLE_RE.search(body)
+        discount = _DISCOUNT_RE.search(body)
+        final = _FINAL_PRICE_RE.search(body)
+        original = _ORIGINAL_PRICE_RE.search(body)
+        if not (title and discount and final and original):
+            continue
+
+        original_cents = _price_to_cents(original.group(1))
+        if original_cents is None:
+            continue
+
+        offers.append({
+            'id': int(app_id),
+            'name': html.unescape(title.group(1)).strip(),
+            'discount_percent': int(discount.group(1)),
+            'final_price': int(final.group(1)),
+            'original_price': original_cents,
+            # Position in the response is Steam's own top-sellers rank,
+            # which is the only popularity signal available here -- kept
+            # so the most notable titles lead the announcements.
+            'rank': rank,
+        })
+    return offers
+
+
+def _fetch_popular_discounts() -> list[dict]:
+    """The steepest discounts among Steam's top-selling games that are
+    currently on special. category1=998 restricts this to games, so a
+    season pass or a soundtrack going cheap doesn't read as a big title
+    going on sale."""
+    response = requests.get(
+        SEARCH_URL,
+        params={
+            'query': '', 'start': 0, 'count': POPULAR_RANK_DEPTH,
+            'filter': 'topsellers', 'specials': 1, 'category1': 998,
+            'cc': 'us', 'l': 'english', 'json': 1, 'infinite': 1,
+        },
+        headers={'User-Agent': USER_AGENT},
+        timeout=15,
+    )
+    response.raise_for_status()
+
+    rows = _parse_search_rows(response.json().get('results_html', ''))
+    return [row for row in rows if row['discount_percent'] >= MIN_DISCOUNT_PERCENT]
+
+
+def _fetch_free_promos() -> list[dict]:
+    """Normally-paid games gone temporarily free. Still read off
+    featuredcategories rather than the search ranking above: a giveaway
+    earns no revenue, so it never climbs a top-sellers list no matter how
+    popular it is, but Steam does put a real one on the front page."""
     response = requests.get(
         FEATURED_URL, params={'cc': 'us', 'l': 'english'}, headers={'User-Agent': USER_AGENT}, timeout=10
     )
     response.raise_for_status()
-    data = response.json()
 
-    specials = data.get('specials', {}).get('items', [])
-    top_seller_ids = {item['id'] for item in data.get('top_sellers', {}).get('items', [])}
-
+    specials = response.json().get('specials', {}).get('items', [])
     # `or 0` rather than a .get default: Steam sends original_price as an
     # explicit null for some items, and `None >= FREE_PROMO_MIN_PRICE`
-    # raises a TypeError that _fetch_offers' caller swallows whole --
-    # silently switching the entire feature off until the offending item
-    # rotated back out of the window.
-    free_promos = [
+    # raises a TypeError that the caller swallows whole -- silently
+    # switching the entire feature off until the offending item rotated
+    # back out of the window.
+    return [
         s for s in specials
         if s.get('discount_percent') == 100 and (s.get('original_price') or 0) >= FREE_PROMO_MIN_PRICE
     ]
+
+
+def _fetch_offers():
+    """Returns (popular_discounts, free_promos). The two come from
+    different endpoints (see each helper) and are fetched independently,
+    so one being down or changing shape doesn't take the other with it."""
+    popular_discounts, free_promos = [], []
+
+    try:
+        free_promos = _fetch_free_promos()
+    except Exception:
+        pass
+    try:
+        popular_discounts = _fetch_popular_discounts()
+    except Exception:
+        pass
+
     free_ids = {s['id'] for s in free_promos}
-    popular_discounts = [
-        s for s in specials
-        if s.get('discounted') and s['id'] in top_seller_ids and s['id'] not in free_ids
-    ]
+    popular_discounts = [s for s in popular_discounts if s['id'] not in free_ids]
 
     return popular_discounts, free_promos
 
@@ -151,19 +271,46 @@ def check_steam_sales() -> list[str]:
         app_id: seen for app_id, seen in last_seen.items() if seen >= stale_cutoff
     }
 
-    messages = []
+    fresh = []
     for app_id, sale in current_offers.items():
         # Anything still in last_seen is either currently running or was
         # running recently enough to be the same sale rotating back in.
         if not is_first_ever and app_id not in last_seen:
-            if sale.get('discount_percent') == 100:
-                messages.append(_format_free_promo(sale))
-            else:
-                messages.append(_format_sale(sale))
+            fresh.append(sale)
         last_seen[app_id] = now
 
     state['last_seen'] = last_seen
     state.pop('active_sale_ids', None)  # superseded; don't leave it to be re-read
     _save_state(state)
+
+    return _build_messages(fresh)
+
+
+def _build_messages(fresh: list[dict]) -> list[str]:
+    """Announcement text for newly-found offers. A free giveaway always
+    gets its own message -- there's rarely more than one and it's the most
+    interesting thing this posts. Discounts are capped: the day a seasonal
+    sale opens, dozens of popular titles turn over at once, and fifty
+    consecutive messages is worse than useless. The steepest few get a
+    message each and the rest one summary line."""
+    free = [s for s in fresh if s.get('discount_percent') == 100]
+    # By top-sellers rank, not by discount. Everything here already
+    # cleared MIN_DISCOUNT_PERCENT, so they're all big cuts; what
+    # separates them is whether anyone's heard of the game. Sorting by
+    # percentage instead put a 90%-off decade-old Ubisoft back-catalogue
+    # title above a 70%-off Persona 3 Reload, which is backwards.
+    discounts = sorted(
+        (s for s in fresh if s.get('discount_percent') != 100),
+        key=lambda s: s.get('rank', len(fresh)),
+    )
+
+    messages = [_format_free_promo(sale) for sale in free]
+    messages += [_format_sale(sale) for sale in discounts[:MAX_INDIVIDUAL_ANNOUNCEMENTS]]
+
+    overflow = discounts[MAX_INDIVIDUAL_ANNOUNCEMENTS:]
+    if overflow:
+        listed = ", ".join(f"{s['name']} ({s['discount_percent']}%)" for s in overflow[:12])
+        more = f" and {len(overflow) - 12} more" if len(overflow) > 12 else ""
+        messages.append(f"🛒 **Also on sale:** {listed}{more}")
 
     return messages
