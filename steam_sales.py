@@ -232,7 +232,7 @@ def _format_sale(sale) -> str:
         f"🛒 **Steam Sale: {name}**\n"
         f"{discount}% off — ${price:.2f} (was ${original:.2f})\n"
         f"{_store_url(sale['id'])}\n"
-        f"THUMBNAIL: {_header_image(sale['id'])}"
+        f"IMAGE: {_header_image(sale['id'])}"
     )
 
 
@@ -243,7 +243,7 @@ def _format_free_promo(sale) -> str:
         f"🎉 **FREE ON STEAM: {name}**\n"
         f"Normally ${original:.2f} — currently free to claim!\n"
         f"{_store_url(sale['id'])}\n"
-        f"THUMBNAIL: {_header_image(sale['id'])}"
+        f"IMAGE: {_header_image(sale['id'])}"
     )
 
 

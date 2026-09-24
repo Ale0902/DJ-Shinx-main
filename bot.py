@@ -58,12 +58,16 @@ ANNOUNCEMENT_URL_RE = re.compile(r'https?://\S+')
 
 MAX_EMBED_DESC = 4096  # Discord's hard cap on an embed description
 
-# Opt-in marker any announcement string can end with to give its embed a
-# thumbnail: a line reading "THUMBNAIL: <url>". _embed strips it back out
-# before the text is shown, so a module that has cover art or a store
-# capsule to hand can attach it without every _broadcast caller having to
-# learn a richer message type than "a string".
-THUMBNAIL_RE = re.compile(r'^THUMBNAIL:\s*(\S+)\s*$', re.MULTILINE)
+# Opt-in marker any announcement string can end with to give its embed
+# artwork: a line reading "IMAGE: <url>". _embed strips it back out before
+# the text is shown, so a module that has cover art or a store banner to
+# hand can attach it without every _broadcast caller having to learn a
+# richer message type than "a string".
+#
+# Deliberately set_image and not set_thumbnail: the thumbnail slot is a
+# small square in the embed's corner, which rendered a 460x215 store
+# banner at postage-stamp size. set_image gives it the embed's full width.
+IMAGE_MARKER_RE = re.compile(r'^IMAGE:\s*(\S+)\s*$', re.MULTILINE)
 
 
 def _with_question(question_line: str, body: str) -> str:
@@ -93,24 +97,25 @@ def _embed(text: str) -> discord.Embed:
     sized for Discord's 2000-char plain-message limit, well under an
     embed description's 4096-char cap, so no re-chunking is needed.
 
-    A trailing "THUMBNAIL: <url>" line becomes the embed's corner
-    thumbnail. If the remaining text contains a direct image URL (e.g.
-    /chat citing an image_search result), that's shown full-width inside
-    the embed instead of as a plain link. The thumbnail is pulled out
-    first so its own .jpg URL can't be mistaken for one of those and
-    blown up to full width."""
-    thumbnail_match = THUMBNAIL_RE.search(text)
-    thumbnail_url = None
-    if thumbnail_match:
-        thumbnail_url = thumbnail_match.group(1)
-        text = THUMBNAIL_RE.sub('', text).strip()
+    A trailing "IMAGE: <url>" line becomes the embed's full-width image
+    and is stripped from the visible text. Failing that, a direct image
+    URL in the text itself (e.g. /chat citing an image_search result) is
+    shown the same way rather than left as a plain link -- an explicit
+    marker wins, so a module that named its artwork doesn't have it
+    replaced by some other .jpg that happens to appear in the body."""
+    artwork_match = IMAGE_MARKER_RE.search(text)
+    artwork_url = None
+    if artwork_match:
+        artwork_url = artwork_match.group(1)
+        text = IMAGE_MARKER_RE.sub('', text).strip()
 
     e = discord.Embed(description=text, color=EMBED_COLOR)
-    if thumbnail_url:
-        e.set_thumbnail(url=thumbnail_url)
-    image_match = IMAGE_URL_RE.search(text)
-    if image_match:
-        e.set_image(url=image_match.group(0))
+    if artwork_url:
+        e.set_image(url=artwork_url)
+    else:
+        image_match = IMAGE_URL_RE.search(text)
+        if image_match:
+            e.set_image(url=image_match.group(0))
     return e
 
 

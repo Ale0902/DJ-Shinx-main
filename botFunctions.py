@@ -192,12 +192,12 @@ def check_berserk_release() -> str | None:
 
     title_part = f": {chapter_title}" if chapter_title else ''
     cover_url = _mangadex_cover_url(BERSERK_MANGADEX_ID)
-    thumbnail_part = f"\nTHUMBNAIL: {cover_url}" if cover_url else ''
+    image_part = f"\nIMAGE: {cover_url}" if cover_url else ''
     return (
         "⚔️ **New Berserk Chapter Released!**\n"
         f"**Chapter {chapter_num}**{title_part}\n"
         f"Read it here: https://mangadex.org/chapter/{chapter_id}"
-        f"{thumbnail_part}"
+        f"{image_part}"
     )
 
 
@@ -252,18 +252,23 @@ def check_absolute_batman_release() -> str | None:
     link = latest.get('site_detail_url', '')
     link_part = f"\nMore info: {link}" if link else ''
 
-    # Comic Vine returns the issue's cover in several sizes; medium is the
-    # right order of magnitude for a thumbnail, with the others as
-    # fallbacks in case a given issue is missing that one.
+    # Comic Vine returns the issue's cover in several sizes. These are
+    # ordered largest-first: the cover fills the embed's width, so a
+    # small variant would render visibly soft. Each is a fallback for the
+    # last in case a given issue is missing that particular size.
     image = latest.get('image') or {}
     cover_url = next(
-        (image.get(key) for key in ('medium_url', 'original_url', 'thumb_url') if image.get(key)),
+        (
+            image.get(key) for key in
+            ('super_url', 'screen_large_url', 'original_url', 'medium_url', 'thumb_url')
+            if image.get(key)
+        ),
         None,
     )
-    thumbnail_part = f"\nTHUMBNAIL: {cover_url}" if cover_url else ''
+    image_part = f"\nIMAGE: {cover_url}" if cover_url else ''
 
     return (
         "🦇 **New Absolute Batman Issue Released!**\n"
         f"**Issue #{issue_number}: {title}**{link_part}"
-        f"{thumbnail_part}"
+        f"{image_part}"
     )
