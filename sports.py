@@ -163,7 +163,14 @@ def _format_time(dt: datetime.datetime) -> str:
     return dt.strftime('%I:%M %p ET').lstrip('0')
 
 
-def _format_game_line(event: dict, is_soccer: bool = False, label_fn: Callable[[dict], str] | None = None) -> str:
+def _format_game_line(
+    event: dict, is_soccer: bool = False, label_fn: Callable[[dict], str] | None = None,
+    compact: bool = False,
+) -> str:
+    """compact strips what's constant across every row of a view -- the
+    date, the 🔴 live marker and the leading sport emoji. Only for views
+    where all three repeat identically all the way down and carry no
+    information -- see the note where they're applied below."""
     sport_emoji = '⚽' if is_soccer else '🏈'
 
     competition = event['competitions'][0]
@@ -207,17 +214,32 @@ def _format_game_line(event: dict, is_soccer: bool = False, label_fn: Callable[[
         matchup = f"{away_name} @ {home_name}"
         score = f"{away_score_text}-{home_score_text}"
 
+    # A Discord embed is a fixed width -- there's no way to widen the box,
+    # so the only way to stop lines wrapping is to spend fewer characters
+    # on them. "Thursday (09/24): " and "🔴 " cost ~22 of them on every
+    # single row of /livesoccer, where by definition every match is live
+    # and today, which was enough to wrap nearly every matchup onto a
+    # second line. The header already says both.
+    day_prefix = '' if compact else f"{day_label}: "
+    live_dot = '' if compact else '🔴 '
+    # The leading ⚽ goes too: in /livesoccer the header already says
+    # soccer, and the goal lines indented under each match use ⚽ as their
+    # own bullet, so repeating it on the score line only made the two
+    # collide visually. Unindented + blank-line separated is enough to
+    # mark a score line.
+    lead = '' if compact else f"{sport_emoji} "
+
     if state == 'in':
         clock = status.get('displayClock', '')
         if is_soccer:
-            return f"{sport_emoji} 🔴 {day_label}: {matchup} {score} ({clock})"
+            return f"{lead}{live_dot}{day_prefix}{matchup} {score} ({clock})"
         period = status.get('period', '')
-        return f"{sport_emoji} 🔴 {day_label}: {matchup} {score} (Q{period}, {clock})"
+        return f"{lead}{live_dot}{day_prefix}{matchup} {score} (Q{period}, {clock})"
     elif state == 'post':
         detail = status.get('type', {}).get('description', 'Final')
-        return f"{sport_emoji} {day_label}: {matchup} {score} ({detail})"
+        return f"{lead}{day_prefix}{matchup} {score} ({detail})"
     else:
-        return f"{sport_emoji} {day_label}: {matchup} — {_format_time(game_time)}"
+        return f"{lead}{day_prefix}{matchup} — {_format_time(game_time)}"
 
 
 def nfl_synopsis() -> list[str]:
@@ -579,10 +601,18 @@ def _chunk_ansi_block(header: str, lines: list[str], limit: int = SOCCER_PAGE_LI
     current_len = 0
 
     def flush():
-        if not current:
+        # Callers may pad `lines` with '' separators between blocks; if a
+        # chunk boundary lands on one it would open or close a page with a
+        # stray blank line inside the fence.
+        trimmed = current[:]
+        while trimmed and not trimmed[0].strip():
+            trimmed.pop(0)
+        while trimmed and not trimmed[-1].strip():
+            trimmed.pop()
+        if not trimmed:
             return
         suffix = "" if not messages else " (cont.)"
-        messages.append(f"{header}{suffix}\n```ansi\n" + "\n".join(current) + "\n```")
+        messages.append(f"{header}{suffix}\n```ansi\n" + "\n".join(trimmed) + "\n```")
 
     for line in lines:
         line_len = len(line) + 1
@@ -718,7 +748,7 @@ def _match_event_lines(competition: dict) -> list[str]:
 def _format_live_soccer_line(event: dict, label_fn: Callable[[dict], str] | None = None) -> str:
     """A live match's score line plus, indented beneath it, each goal and
     red card so far with who was involved and the minute it happened."""
-    lines = [_format_game_line(event, is_soccer=True, label_fn=label_fn)]
+    lines = [_format_game_line(event, is_soccer=True, label_fn=label_fn, compact=True)]
     lines.extend(_match_event_lines(event['competitions'][0]))
     return "\n".join(lines)
 
@@ -748,7 +778,12 @@ def live_soccer_matches() -> list[str]:
         if not events:
             continue
         label_fn = _flag_label if name in INTERNATIONAL_COMPETITIONS else None
-        lines = [_format_live_soccer_line(event, label_fn=label_fn) for event in events]
+        blocks = [_format_live_soccer_line(event, label_fn=label_fn) for event in events]
+        # One blank line between matches. Each block is a score line with
+        # its own goals indented underneath, so without a separator the
+        # goals of one match butt straight up against the next match's
+        # score line and the whole slate reads as a single wall.
+        lines = [part for block in blocks for part in (block, '')][:-1]
         header = "## Live Soccer Right Now!\n\n**{}**".format(name) if not messages else f"**{name}**"
         messages.extend(_chunk_ansi_block(header, lines))
 
