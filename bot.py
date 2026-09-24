@@ -58,6 +58,13 @@ ANNOUNCEMENT_URL_RE = re.compile(r'https?://\S+')
 
 MAX_EMBED_DESC = 4096  # Discord's hard cap on an embed description
 
+# Opt-in marker any announcement string can end with to give its embed a
+# thumbnail: a line reading "THUMBNAIL: <url>". _embed strips it back out
+# before the text is shown, so a module that has cover art or a store
+# capsule to hand can attach it without every _broadcast caller having to
+# learn a richer message type than "a string".
+THUMBNAIL_RE = re.compile(r'^THUMBNAIL:\s*(\S+)\s*$', re.MULTILINE)
+
 
 def _with_question(question_line: str, body: str) -> str:
     """Joins /chat's echoed question and its status/answer into a single
@@ -85,10 +92,22 @@ def _embed(text: str) -> discord.Embed:
     every bot response. Existing sports.py/llmask.py output is already
     sized for Discord's 2000-char plain-message limit, well under an
     embed description's 4096-char cap, so no re-chunking is needed.
-    If the text contains a direct image URL (e.g. /chat citing an
-    image_search result), it's shown as an actual picture inside the
-    embed instead of just a plain link."""
+
+    A trailing "THUMBNAIL: <url>" line becomes the embed's corner
+    thumbnail. If the remaining text contains a direct image URL (e.g.
+    /chat citing an image_search result), that's shown full-width inside
+    the embed instead of as a plain link. The thumbnail is pulled out
+    first so its own .jpg URL can't be mistaken for one of those and
+    blown up to full width."""
+    thumbnail_match = THUMBNAIL_RE.search(text)
+    thumbnail_url = None
+    if thumbnail_match:
+        thumbnail_url = thumbnail_match.group(1)
+        text = THUMBNAIL_RE.sub('', text).strip()
+
     e = discord.Embed(description=text, color=EMBED_COLOR)
+    if thumbnail_url:
+        e.set_thumbnail(url=thumbnail_url)
     image_match = IMAGE_URL_RE.search(text)
     if image_match:
         e.set_image(url=image_match.group(0))
@@ -100,7 +119,16 @@ async def _send_announcement(destination, message: str):
     Discord actually unfurls it into a preview card (a link inside an
     embed's description never unfurls). destination can be a channel or
     a command Context -- both expose a compatible .send()."""
-    await destination.send(embed=_embed(message))
+    embed = _embed(message)
+    await destination.send(embed=embed)
+
+    # The bare re-post exists only to make Discord generate a preview card
+    # for the link. An embed that already carries its own artwork doesn't
+    # need one, and posting the URL again underneath just leaves a naked
+    # duplicate link hanging under every announcement.
+    if embed.thumbnail.url or embed.image.url:
+        return
+
     url_match = ANNOUNCEMENT_URL_RE.search(message)
     if url_match:
         await destination.send(url_match.group(0))

@@ -213,20 +213,38 @@ def _fetch_offers():
     return popular_discounts, free_promos
 
 
+def _store_url(app_id) -> str:
+    return f"https://store.steampowered.com/app/{app_id}/"
+
+
+def _header_image(app_id) -> str:
+    """Every Steam app serves its store banner at this fixed path, so the
+    announcement gets artwork without a second request to look one up."""
+    return f"https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/header.jpg"
+
+
 def _format_sale(sale) -> str:
     name = sale['name']
     discount = sale['discount_percent']
     price = sale['final_price'] / 100
     original = sale['original_price'] / 100
-    url = f"https://store.steampowered.com/app/{sale['id']}/"
-    return f"🛒 **Steam Sale: {name}**\n{discount}% off — ${price:.2f} (was ${original:.2f})\n{url}"
+    return (
+        f"🛒 **Steam Sale: {name}**\n"
+        f"{discount}% off — ${price:.2f} (was ${original:.2f})\n"
+        f"{_store_url(sale['id'])}\n"
+        f"THUMBNAIL: {_header_image(sale['id'])}"
+    )
 
 
 def _format_free_promo(sale) -> str:
     name = sale['name']
     original = sale['original_price'] / 100
-    url = f"https://store.steampowered.com/app/{sale['id']}/"
-    return f"🎉 **FREE ON STEAM: {name}**\nNormally ${original:.2f} — currently free to claim!\n{url}"
+    return (
+        f"🎉 **FREE ON STEAM: {name}**\n"
+        f"Normally ${original:.2f} — currently free to claim!\n"
+        f"{_store_url(sale['id'])}\n"
+        f"THUMBNAIL: {_header_image(sale['id'])}"
+    )
 
 
 def _load_last_seen(state, now: float) -> tuple[dict[str, float], bool]:
