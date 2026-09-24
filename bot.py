@@ -15,6 +15,7 @@ import llmask
 import memory_db
 import sports
 import steam_sales
+import update_log
 import f1
 import os
 from dotenv import load_dotenv
@@ -107,6 +108,13 @@ async def _send_announcement(destination, message: str):
 # Commands that work normally but are left out of /help entirely -- easter
 # eggs that only show up if you already know about them.
 HIDDEN_COMMANDS = {'vini'}
+
+# Private maintainer channel for the deploy changelog (see update_log.py).
+# Hardcoded on purpose: this is deliberately NOT a /setchannel feature and
+# has no command of its own, so no other server can opt into it and it
+# never appears in /help. A channel id resolves to exactly one channel
+# across all of Discord, so there's no way for this to fan out.
+UPDATE_LOG_CHANNEL_ID = 1552777614111014972
 
 # Which section of /help each command is listed under. Anything not listed
 # here falls into an "Other" section so a forgotten new command still shows
@@ -680,6 +688,33 @@ def run_discord_bot():
 
         await _broadcast('steam_sales', send)
 
+    async def _post_update_log():
+        """Drops a short changelog in the maintainer channel when the bot
+        comes back up on new code. Sends straight to one hardcoded channel
+        rather than through _broadcast, so this can't reach any other
+        server, and there's no command that exposes it. Never raises: a
+        tracking nicety must not be able to take startup down with it."""
+        try:
+            summary = await asyncio.to_thread(update_log.pending_update)
+            if not summary:
+                return
+
+            channel = client.get_channel(UPDATE_LOG_CHANNEL_ID)
+            if channel is None:
+                # Not in that guild, or the channel is gone. update_log has
+                # already advanced its baseline, so this won't be retried --
+                # log it locally so the changelog isn't just lost silently.
+                logger.warning(
+                    f"update_log: channel {UPDATE_LOG_CHANNEL_ID} not reachable; "
+                    f"update went unposted:\n{summary}"
+                )
+                return
+
+            for chunk in llmask.chunk_response(summary):
+                await channel.send(embed=_embed(chunk))
+        except Exception as e:
+            logger.warning(f"update_log: couldn't post the update summary: {e}")
+
     @client.event
     async def on_ready():
         sotd.start()
@@ -691,6 +726,7 @@ def run_discord_bot():
         steam_sale_alerts.start()
         logger.info(f'{client.user} is now running!')
         await client.tree.sync()
+        await _post_update_log()
 
     client.run(TOKEN)
 

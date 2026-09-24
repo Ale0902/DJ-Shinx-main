@@ -9,3 +9,4 @@ steam_sales_state.json
 memory.db
 channel_config.db
 charts/
+update_log_state.json
