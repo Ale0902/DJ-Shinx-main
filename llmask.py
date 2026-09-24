@@ -1,11 +1,16 @@
 import os
 import sys
 import re
+import json
 import time
+import socket
 import datetime
 import logging
 import asyncio
 import threading
+import contextlib
+import http.client
+import urllib.parse
 import requests
 
 from zoneinfo import ZoneInfo
@@ -109,14 +114,22 @@ TOOL_CALL_RE = re.compile(r'TOOL_CALL:\s*(\w+)\(\s*(["\'])(.*)\2\s*\)')
 # Fallback for a close-but-not-quite call: the small local model has been
 # observed dropping the "TOOL_CALL:" prefix and the argument's quote marks
 # entirely (e.g. a bare "stock_price_history(MSFT:2023-09-18:today)" on
-# its own line) while still getting the tool name and argument content
-# right. Only trusted when the captured name is an actual known tool (see
-# _extract_tool_call) -- ordinary prose essentially never takes the shape
-# of one of these specific names immediately followed by "(...)", so this
-# doesn't risk misreading a normal sentence as a tool call. Anchored to a
-# whole line (MULTILINE ^...$) rather than searched anywhere in the
-# text, for the same reason.
-LOOSE_TOOL_CALL_RE = re.compile(r'^(\w+)\(\s*["\']?(.*?)["\']?\s*\)\s*$', re.MULTILINE)
+# its own line), or keeping the prefix but dropping just the quotes (e.g.
+# "TOOL_CALL: stock_price_history(AAPL)", which the strict form above
+# misses, leaking the raw call into the answer), while still getting the
+# tool name and argument content right. Only trusted when the captured
+# name is an actual known tool (see _extract_tool_call) -- ordinary prose
+# essentially never takes the shape of one of these specific names
+# immediately followed by "(...)", so this doesn't risk misreading a
+# normal sentence as a tool call. Anchored to a whole line (MULTILINE
+# ^...$) rather than searched anywhere in the text, for the same reason.
+LOOSE_TOOL_CALL_RE = re.compile(
+    r'^[ \t]*(?:TOOL_CALL:[ \t]*)?(\w+)\(\s*["\']?(.*?)["\']?\s*\)\s*$', re.MULTILINE
+)
+
+# Any call line still left in a final answer is scaffolding, never
+# something to show the user.
+TOOL_CALL_LINE_RE = re.compile(r'^[ \t]*TOOL_CALL:.*$', re.MULTILINE)
 
 # Third, even looser fallback specifically for stock_price_history: the
 # model has also been observed dropping the tool name AND parens
@@ -139,20 +152,32 @@ def _extract_tool_call(content: str, known_tools) -> tuple[str, str] | None:
     if match:
         return match.group(1), match.group(3)
 
-    loose_match = LOOSE_TOOL_CALL_RE.search(content)
-    if loose_match and loose_match.group(1) in known_tools:
-        return loose_match.group(1), loose_match.group(2).strip('"\'')
+    for loose_match in LOOSE_TOOL_CALL_RE.finditer(content):
+        if loose_match.group(1) in known_tools:
+            return loose_match.group(1), loose_match.group(2).strip('"\'')
 
     if 'stock_price_history' in known_tools and BARE_STOCK_ARG_RE.fullmatch(content.strip()):
         return 'stock_price_history', content.strip()
 
     return None
 
+
+def _remove_tool_call_lines(content: str, known_tools) -> str:
+    """content with every tool-call line taken out -- whatever's left is
+    the answer the model wrote alongside the call."""
+    lines = [line for line in content.split('\n') if _extract_tool_call(line, known_tools) is None]
+    return TOOL_CALL_LINE_RE.sub('', '\n'.join(lines)).strip()
+
 # For verifying the model's final "Source: <url>" citation against URLs it
 # actually saw from a tool this turn, rather than trusting it not to cite
 # something recalled from memory (it has, more than once).
 URL_RE = re.compile(r'https?://\S+')
-SOURCE_LINE_RE = re.compile(r'^Source:\s*(\S+)\s*$', re.MULTILINE)
+# A citation in the expected form, a single URL on its own line.
+SOURCE_LINE_RE = re.compile(r'^[ \t]*Source:[ \t]*(https?://\S+)[ \t]*$', re.MULTILINE | re.IGNORECASE)
+# Any Source line at all -- the model also writes ones like "Source: ESPN"
+# or "Source: <the tool's result text>", which can't be verified either and
+# used to slip past both verification and stripping.
+ANY_SOURCE_LINE_RE = re.compile(r'^[ \t]*Source:.*$', re.MULTILINE | re.IGNORECASE)
 
 # compare_stock_performance (mcp_web_server.py) renders a chart to a local
 # PNG and tags its path with this marker in the tool result text -- pulled
@@ -174,25 +199,38 @@ def _normalize_url(url: str) -> str:
     return re.sub(r'^https?://(www\.)?', '', url.strip()).rstrip('/')
 
 
-def _verify_citation(content: str, seen_urls: set[str]) -> str:
-    """Strips the model's "Source: <url>" line if that URL never actually
-    came back from a tool call this turn (or an earlier turn in the same
-    conversation) -- catches the model citing a plausible-looking URL it
-    recalled from training data instead of one it genuinely looked up."""
-    match = SOURCE_LINE_RE.search(content)
-    if not match:
-        return content
-
-    cited = _normalize_url(match.group(1).rstrip('.,)/'))
+def _is_seen_url(url: str, seen_urls: set[str]) -> bool:
+    cited = _normalize_url(url.rstrip('.,)/'))
     normalized_seen = {_normalize_url(u) for u in seen_urls}
     # Exact match after normalization, or a same-page variant (query string
     # dropped, etc.) -- but require enough shared length that two merely
     # similar paths on the same site can't false-positive off each other.
-    if any(cited == u or (len(cited) > 12 and (cited in u or u in cited)) for u in normalized_seen):
+    return any(cited == u or (len(cited) > 12 and (cited in u or u in cited)) for u in normalized_seen)
+
+
+def _verify_citation(content: str, seen_urls: set[str]) -> str:
+    """Strips each of the model's "Source:" lines whose URL never actually
+    came back from a tool call this turn (or an earlier turn in the same
+    conversation), and any Source line that isn't a URL at all -- catches
+    the model citing a plausible-looking URL it recalled from training data
+    instead of one it genuinely looked up. Each line is checked on its own,
+    so one bad citation doesn't take a verified one down with it."""
+    removed = False
+
+    def keep_if_seen(match: re.Match) -> str:
+        nonlocal removed
+        url_match = SOURCE_LINE_RE.match(match.group(0))
+        if url_match and _is_seen_url(url_match.group(1), seen_urls):
+            return match.group(0)
+        removed = True
+        return ''
+
+    kept = ANY_SOURCE_LINE_RE.sub(keep_if_seen, content)
+    if not removed:
         return content
 
-    stripped = SOURCE_LINE_RE.sub('', content).rstrip()
-    return stripped + "\n\n(Note: I couldn't verify that source against what I actually looked up -- treat this with caution.)"
+    kept = re.sub(r'\n{3,}', '\n\n', kept).rstrip()
+    return kept + "\n\n(Note: I couldn't verify that source against what I actually looked up -- treat this with caution.)"
 
 
 # Whether *this turn's* message is asking to be shown a source/link, so the
@@ -237,7 +275,7 @@ def _wants_image(question: str) -> bool:
 
 
 def _strip_citation(content: str) -> str:
-    return SOURCE_LINE_RE.sub('', content).rstrip()
+    return re.sub(r'\n{3,}', '\n\n', ANY_SOURCE_LINE_RE.sub('', content)).rstrip()
 
 
 # Whether the user explicitly asked for a complete enumeration ("name all
@@ -296,6 +334,70 @@ def _pick_retry_query(question: str, history: list[dict]) -> str:
 # timing out.
 _ollama_lock = threading.Lock()
 
+# Cache priming. gemma3's sliding-window attention stops Ollama reusing the
+# previous request's work whenever that request ran more than ~500 tokens
+# past where the two diverge -- and one turn's search results alone are
+# ~700 -- so nearly every message used to re-read the whole ~2,000-token
+# system prompt and history (~20s). After each reply, _start_priming has
+# Ollama process the conversation's next opening in the background, so the
+# next question only reads itself and its search results. Any real request
+# cancels a priming run still in progress by shutting its socket, which
+# makes Ollama stop at its next batch (a few seconds at most).
+_prime_state_lock = threading.Lock()
+_prime_generation = 0
+_prime_conn: http.client.HTTPConnection | None = None
+
+
+def _cancel_priming() -> None:
+    global _prime_generation, _prime_conn
+    with _prime_state_lock:
+        _prime_generation += 1  # also stops a priming run still waiting for _ollama_lock
+        conn, _prime_conn = _prime_conn, None
+    if conn is not None and conn.sock is not None:
+        with contextlib.suppress(OSError):
+            conn.sock.shutdown(socket.SHUT_RDWR)
+
+
+def _prime_worker(generation: int, messages: list[dict], ollama_url: str, ollama_model: str, ollama_num_ctx: int) -> None:
+    global _prime_conn
+    parsed = urllib.parse.urlparse(ollama_url)
+    conn_class = http.client.HTTPSConnection if parsed.scheme == 'https' else http.client.HTTPConnection
+    with _ollama_lock:
+        with _prime_state_lock:
+            if generation != _prime_generation:
+                return  # a real request (or newer priming) came in while this one waited
+            conn = conn_class(parsed.hostname, parsed.port, timeout=OLLAMA_TIMEOUT)
+            try:
+                conn.connect()  # before publishing, so _cancel_priming always has a socket to shut
+            except OSError:
+                return
+            _prime_conn = conn
+        try:
+            conn.request('POST', '/api/chat', body=json.dumps({
+                'model': ollama_model,
+                'messages': messages,
+                'stream': False,
+                # Same num_ctx as real requests, or Ollama reloads the model.
+                'options': {'num_ctx': ollama_num_ctx, 'num_predict': 1},
+            }), headers={'Content-Type': 'application/json'})
+            conn.getresponse().read()
+        except (OSError, http.client.HTTPException):
+            pass  # cancelled or failed -- the next request is still correct, just slower
+        finally:
+            with _prime_state_lock:
+                if _prime_conn is conn:
+                    _prime_conn = None
+            conn.close()
+
+
+def _start_priming(messages: list[dict], ollama_url: str, ollama_model: str, ollama_num_ctx: int) -> None:
+    _cancel_priming()  # a newer conversation state replaces an older one
+    with _prime_state_lock:
+        generation = _prime_generation
+    threading.Thread(
+        target=_prime_worker, args=(generation, messages, ollama_url, ollama_model, ollama_num_ctx), daemon=True,
+    ).start()
+
 
 def _ollama_chat(
     messages: list[dict], ollama_url: str, ollama_model: str, ollama_num_ctx: int, on_status=None,
@@ -304,7 +406,10 @@ def _ollama_chat(
     call has to wait for another in-flight request to finish first -- lets
     the caller tell the user they're queued instead of leaving them sat
     waiting with no explanation."""
-    if not _ollama_lock.acquire(blocking=False):
+    _cancel_priming()  # a real request never waits on cache warming
+    # Brief grace period so a just-cancelled priming run can release the
+    # lock before this is mistaken for someone else's request.
+    if not _ollama_lock.acquire(timeout=1):
         if on_status:
             on_status(
                 "⏳ Someone else is chatting with me right now -- you're queued, "
@@ -360,8 +465,53 @@ def _tool_description(tool) -> str:
     return first_sentence.rstrip('.') + '.'
 
 
+def _length_rule(wants_full_list: bool) -> str:
+    """The length rule for this question -- exactly one of the two, chosen
+    by intent, so the model never has to balance them against each other.
+    Given with the question rather than in the system prompt, which has to
+    stay the same from one message to the next (see _build_system_prompt)."""
+    if wants_full_list:
+        return (
+            "The user explicitly asked you to list/name/enumerate everything "
+            "of some kind -- give the actual complete list they asked for, "
+            "not a short summary or just a count. Length isn't capped for "
+            "this one."
+        )
+    return (
+        "Give a short, direct summary that answers the question -- 1-3 "
+        "sentences for most questions, more only if it genuinely needs "
+        "detail."
+    )
+
+
+def _now_str() -> str:
+    return datetime.datetime.now(EASTERN).strftime("%A, %B %d, %Y, %I:%M %p ET").replace(" 0", " ")
+
+
+def _facts_message(user_id) -> dict | None:
+    known_facts = memory_db.get_facts(user_id) if user_id is not None else []
+    if not known_facts:
+        return None
+    return {
+        'role': 'system',
+        'content': (
+            "What you already know about this user from past conversations: "
+            + "; ".join(known_facts)
+            + ". Only bring these up if actually relevant to the current "
+            "question -- don't force them into unrelated answers."
+        ),
+    }
+
+
+def _prompt_prefix(system_prompt: str, user_id, history: list[dict]) -> list[dict]:
+    """How every request for a conversation starts -- identical from one
+    message to the next, which is what lets _start_priming prepare it."""
+    facts = _facts_message(user_id)
+    return [{'role': 'system', 'content': system_prompt}, *([facts] if facts else []), *history]
+
+
 def _build_system_prompt(
-    mcp_tools, wants_full_list: bool = False, extra_tools: list[tuple[str, str, str]] | None = None
+    mcp_tools, extra_tools: list[tuple[str, str, str]] | None = None
 ) -> tuple[str, dict[str, str]]:
     """Returns (system_prompt, {tool_name: its single string param name}).
     Both of the MCP server's tools (web_search, fetch_page) take exactly
@@ -369,7 +519,13 @@ def _build_system_prompt(
     tool's JSON schema instead of being hardcoded here. extra_tools is for
     tools that aren't served by the MCP subprocess at all (e.g.
     remember_fact, handled locally since it needs the caller's user_id) --
-    each is (name, param_name, description)."""
+    each is (name, param_name, description).
+
+    The prompt stays byte-for-byte the same all day, so Ollama can reuse
+    its already-processed copy instead of re-reading ~1,800 tokens on every
+    message (~20s on the VM's GPUs) -- see _start_priming. Anything that
+    changes per message (the time, the length rule) goes in the note after
+    the question instead."""
     tool_param = {}
     tool_lines = []
     for t in mcp_tools:
@@ -382,34 +538,21 @@ def _build_system_prompt(
         tool_param[name] = param_name
         tool_lines.append(f'- {name}("{param_name}") -- {description}')
 
-    if wants_full_list:
-        brevity_instruction = (
-            "The user explicitly asked you to list/name/enumerate everything "
-            "of some kind -- give the actual complete list they asked for, "
-            "not a short summary or just a count. Length isn't capped for "
-            "this one."
-        )
-    else:
-        brevity_instruction = (
-            "Give a short, direct summary that answers the question -- 1-3 "
-            "sentences for most questions, more only if it genuinely needs "
-            "detail."
-        )
-
     # Handed to the model directly rather than left for it to fetch with
     # the current_datetime tool. It only gets MAX_TOOL_ITERATIONS calls per
     # question, and spending one on a fact we already know locally is pure
     # waste -- worse, a small model usually doesn't bother making that call
     # at all and just asserts a date near its training cutoff, which
     # silently poisons every "latest"/"this year"/"how long ago" answer
-    # downstream.
-    now_str = datetime.datetime.now(EASTERN).strftime("%A, %B %d, %Y, %I:%M %p ET").replace(" 0", " ")
+    # downstream. Date only here; the time goes with each question.
+    today_str = datetime.datetime.now(EASTERN).strftime("%A, %B %d, %Y").replace(" 0", " ")
 
     system_prompt = (
         f"You are Agent Shinx, a Discord bot that works like a quick search "
-        f"engine. {brevity_instruction} Plain, direct tone -- not overly "
-        f"casual, not full of slang or emoji.\n\n"
-        f"Right now it is {now_str}. That is the real current date -- use it "
+        f"engine. How long your answer should be is given with each question. "
+        f"Plain, direct tone -- not overly casual, not full of slang or emoji.\n\n"
+        f"Right now it is {today_str} (the current time is given with each "
+        f"question). That is the real current date -- use it "
         f"for anything involving \"today\", \"now\", \"this year\", "
         f"\"latest\", \"current\", or how long ago something was, and don't "
         f"spend a tool call looking it up. Your own sense of the date comes "
@@ -567,7 +710,7 @@ def _tool_status_label(name: str) -> str:
 
 async def _ask_with_tools(
     question: str, history: list[dict], prior_urls: set[str], ollama_url: str, ollama_model: str,
-    ollama_num_ctx: int, on_status=None, user_id=None,
+    ollama_num_ctx: int, on_status=None, user_id=None, system_prompt_out: list[str] | None = None,
 ) -> tuple[str, set[str], str | None]:
     """Runs the question through Ollama, always searching first rather
     than leaving that decision to the model -- model-judgment triggering
@@ -611,7 +754,9 @@ async def _ask_with_tools(
 
             mcp_tools = (await session.list_tools()).tools
             extra_tools = [('remember_fact', 'fact', REMEMBER_FACT_DESCRIPTION)] if user_id is not None else []
-            system_prompt, tool_param = _build_system_prompt(mcp_tools, _wants_full_list(question), extra_tools)
+            system_prompt, tool_param = _build_system_prompt(mcp_tools, extra_tools)
+            if system_prompt_out is not None:
+                system_prompt_out.append(system_prompt)  # for priming the next turn (see ask)
 
             seen_urls: set[str] = set(prior_urls)
             chart_path: str | None = None
@@ -626,23 +771,10 @@ async def _ask_with_tools(
                 search_text = f"Search failed: {e}"
             seen_urls |= _extract_urls(search_text)
 
-            messages = [{'role': 'system', 'content': system_prompt}]
-
-            known_facts = memory_db.get_facts(user_id) if user_id is not None else []
-            if known_facts:
-                messages.append({
-                    'role': 'system',
-                    'content': (
-                        "What you already know about this user from past conversations: "
-                        + "; ".join(known_facts)
-                        + ". Only bring these up if actually relevant to the current "
-                        "question -- don't force them into unrelated answers."
-                    ),
-                })
+            messages = _prompt_prefix(system_prompt, user_id, history)
 
             result_label = "Image search results" if initial_tool == 'image_search' else "Web search results"
             messages += [
-                *history,
                 {'role': 'user', 'content': question},
                 {
                     'role': 'user',
@@ -652,13 +784,28 @@ async def _ask_with_tools(
                         "relevant (e.g. this is just casual conversation), ignore "
                         "them and answer normally. Only cite a URL that actually "
                         "appears in a tool result you received this conversation -- "
-                        "never one from memory."
+                        "never one from memory.\n\n"
+                        f"It's currently {_now_str()}. {_length_rule(_wants_full_list(question))}"
                     ),
                 },
             ]
 
             retried = False
             retry_query = _pick_retry_query(question, history)
+            calls_made: set[str] = set()
+
+            def finish(content: str) -> tuple[str, set[str], str | None]:
+                content = TOOL_CALL_LINE_RE.sub('', content).strip()
+                if chart_path:
+                    # compare_stock_performance/stock_price_history are
+                    # told not to add a Source line -- there's no real
+                    # URL for tool-computed chart data, so strip one off
+                    # if the model added one anyway, rather than run it
+                    # through _verify_citation and show a "couldn't
+                    # verify" caveat under an otherwise fully
+                    # tool-grounded, real chart.
+                    return _strip_citation(content), seen_urls, chart_path
+                return _verify_citation(content, seen_urls), seen_urls, chart_path
 
             for _ in range(MAX_TOOL_ITERATIONS):
                 if on_status:
@@ -699,21 +846,30 @@ async def _ask_with_tools(
                         })
                         continue
 
-                    if chart_path:
-                        # compare_stock_performance/stock_price_history are
-                        # told not to add a Source line -- there's no real
-                        # URL for tool-computed chart data, so strip one off
-                        # if the model added one anyway, rather than run it
-                        # through _verify_citation and show a "couldn't
-                        # verify" caveat under an otherwise fully
-                        # tool-grounded, real chart.
-                        return _strip_citation(content), seen_urls, chart_path
+                    return finish(content)
 
-                    return _verify_citation(content, seen_urls), seen_urls, chart_path
+                # "Never repeat a search you already ran", enforced: an
+                # exact repeat of a call made earlier this turn gets nothing
+                # new, and re-running it has looped straight into
+                # MAX_TOOL_ITERATIONS before. The model often restates the
+                # call next to its real answer, so if there's other text,
+                # that text is the answer.
+                name, arg = tool_call
+                call_key = f'{name}("{arg}")'
+                if call_key in calls_made:
+                    rest = _remove_tool_call_lines(content, tool_param)
+                    if rest:
+                        return finish(rest)
+                    messages.append({'role': 'assistant', 'content': content})
+                    messages.append({
+                        'role': 'user',
+                        'content': f"You already ran {call_key} -- its result is above. Answer the question now using it.",
+                    })
+                    continue
+                calls_made.add(call_key)
 
                 messages.append({'role': 'assistant', 'content': content})
 
-                name, arg = tool_call
                 if on_status:
                     on_status(_tool_status_label(name))
 
@@ -738,7 +894,14 @@ async def _ask_with_tools(
                         chart_match = CHART_PATH_RE.search(result_text)
                         if chart_match:
                             chart_path = chart_match.group(1)
-                            result_text = CHART_PATH_RE.sub('', result_text).rstrip()
+                            # Without this the model can't tell the chart
+                            # already exists, and calls the tool again to
+                            # "show" it.
+                            result_text = (
+                                CHART_PATH_RE.sub('', result_text).rstrip()
+                                + "\n\n(The chart has been rendered and is shown to the user "
+                                "automatically -- don't call the tool again for it.)"
+                            )
 
                 messages.append({
                     'role': 'user',
@@ -802,10 +965,12 @@ def ask(question: str, conversation_id=None, on_status=None, user_id=None) -> tu
         logger.warning("OLLAMA_NUM_CTX must be an integer; using default %d", DEFAULT_OLLAMA_NUM_CTX)
         ollama_num_ctx = DEFAULT_OLLAMA_NUM_CTX
     history, prior_urls = _get_conversation(conversation_id) if conversation_id is not None else ([], set())
+    system_prompt_out: list[str] = []
     try:
         full_answer, seen_urls, chart_path = asyncio.run(
             _ask_with_tools(
                 question, history, prior_urls, ollama_url, ollama_model, ollama_num_ctx, on_status, user_id,
+                system_prompt_out,
             )
         )
         full_answer = full_answer or "DJ Shinx's brain came back empty. Try rephrasing that."
@@ -818,6 +983,13 @@ def ask(question: str, conversation_id=None, on_status=None, user_id=None) -> tu
                 {'role': 'assistant', 'content': full_answer},
             ]
             _save_conversation(conversation_id, updated_history, prior_urls | seen_urls)
+            if system_prompt_out:
+                # Exactly how this conversation's next request will start --
+                # the same trimmed history _get_conversation will hand back.
+                next_prefix = _prompt_prefix(
+                    system_prompt_out[0], user_id, updated_history[-(MAX_HISTORY_TURNS * 2):]
+                )
+                _start_priming(next_prefix, ollama_url, ollama_model, ollama_num_ctx)
         return displayed_answer, chart_path
     except requests.exceptions.ConnectionError:
         return "Couldn't reach the LLM — is Ollama running on the VM and reachable from here?", None
