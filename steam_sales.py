@@ -40,7 +40,15 @@ import re
 import json
 import time
 import html
+import logging
+import datetime
 import requests
+
+from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
+
+EASTERN = ZoneInfo("America/New_York")
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE, 'steam_sales_state.json')
@@ -69,6 +77,29 @@ MAX_INDIVIDUAL_ANNOUNCEMENTS = 5
 # Entries per page of /steamsales. Each is one line, so this is about
 # how much someone wants to read at once rather than any Discord limit.
 SALES_PER_PAGE = 15
+
+# Steam advertises running sale events -- franchise, publisher and
+# seasonal sales -- as "spotlight" entries on the featured endpoint. The
+# ones that point at a /sale/<slug> page are the events; a spotlight
+# pointing at /app/<id> is a single game's weekend deal, which the
+# per-title announcements above already cover.
+SALE_EVENT_URL_RE = re.compile(r'https?://store\.steampowered\.com/sale/([\w-]+)', re.IGNORECASE)
+
+# Pulled off the sale page itself rather than the spotlight, which only
+# carries a category label ("FRANCHISE SALE") and an unfilled "Offer ends
+# %1$s." template with no actual date in it.
+_SALE_TITLE_RE = re.compile(r'''og:title["'][^>]+content=["']([^"']+)''', re.IGNORECASE)
+_SALE_IMAGE_RE = re.compile(r'''og:image["'][^>]+content=["']([^"']+)''', re.IGNORECASE)
+# The page embeds these as HTML-escaped JSON, so the quote before the
+# colon may be a literal " or an &quot; depending on where it appears.
+_SALE_START_RE = re.compile(r'rtime32_start_time(?:&quot;|")\s*:\s*(\d+)')
+_SALE_END_RE = re.compile(r'rtime32_end_time(?:&quot;|")\s*:\s*(\d+)')
+
+# Sale events are rare and individually notable (typically two to five
+# running at once), unlike the dozens of per-title discounts, so there's
+# no flood to guard against -- but a seasonal sale can spawn a batch of
+# franchise sales alongside it, so this stops that becoming a wall.
+MAX_EVENT_ANNOUNCEMENTS = 5
 
 # Only announce a "gone free" game if it normally costs at least this much
 # (in cents) -- otherwise a $1 indie title going free would be as noisy as
@@ -308,6 +339,167 @@ def current_sales_pages() -> list[tuple[str, str]]:
         pages.append(("Popular Steam Sales", body))
     return pages
 
+
+
+def _fetch_sale_event_spotlights() -> list[dict]:
+    """Running sale events, as (slug, url, label) taken from the featured
+    endpoint's spotlight slots."""
+    response = requests.get(
+        FEATURED_URL, params={'cc': 'us', 'l': 'english'}, headers={'User-Agent': USER_AGENT}, timeout=10
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    events = {}
+    for section in data.values():
+        if not isinstance(section, dict) or section.get('id') != 'cat_spotlight':
+            continue
+        for item in section.get('items', []):
+            match = SALE_EVENT_URL_RE.match(item.get('url') or '')
+            if not match:
+                continue  # a single game's weekend deal, not an event
+            slug = match.group(1)
+            # Keyed by slug: the same event can hold more than one
+            # spotlight slot, and it should still only announce once.
+            events[slug] = {
+                'slug': slug,
+                'url': match.group(0),
+                'label': (item.get('name') or '').strip(),
+                'spotlight_image': item.get('header_image'),
+            }
+    return list(events.values())
+
+
+def _fetch_sale_event_details(event: dict) -> dict | None:
+    """Fills in the event's real name, artwork and start/end times by
+    reading its sale page. Returns None if the page can't be read or
+    carries no end time -- without one there's no way to say how long the
+    sale runs, which is half the point of announcing it."""
+    try:
+        response = requests.get(event['url'], headers={'User-Agent': USER_AGENT}, timeout=15)
+        response.raise_for_status()
+        page = response.text
+    except Exception as e:
+        logger.debug(f"steam sale event: couldn't read {event['url']}: {e}")
+        return None
+
+    end_match = _SALE_END_RE.search(page)
+    if not end_match:
+        return None
+
+    start_match = _SALE_START_RE.search(page)
+    title_match = _SALE_TITLE_RE.search(page)
+    image_match = _SALE_IMAGE_RE.search(page)
+
+    return {
+        **event,
+        'title': html.unescape(title_match.group(1)).strip() if title_match else event['slug'],
+        # The sale page's own banner is the better picture; the
+        # spotlight's vertical capsule is a fallback for a page that
+        # doesn't advertise one.
+        'image': (image_match.group(1) if image_match else None) or event.get('spotlight_image'),
+        'start': int(start_match.group(1)) if start_match else None,
+        'end': int(end_match.group(1)),
+    }
+
+
+def _format_duration(seconds: float) -> str:
+    """How much longer the sale runs, in the largest unit that still says
+    something useful -- "6 days left" rather than "6 days 4 hours"."""
+    if seconds <= 0:
+        return "ending now"
+    days, remainder = divmod(int(seconds), 86400)
+    hours = remainder // 3600
+    if days >= 1:
+        return f"{days} day{'s' if days != 1 else ''} left"
+    if hours >= 1:
+        return f"{hours} hour{'s' if hours != 1 else ''} left"
+    return "under an hour left"
+
+
+def _format_sale_event(event: dict, now: float) -> str:
+    ends = datetime.datetime.fromtimestamp(event['end'], EASTERN)
+    # %-d/%-I would drop the leading zeros, but aren't portable to
+    # Windows, so strip them afterwards instead.
+    ends_text = ends.strftime('%A, %B %d at %I:%M %p ET').replace(' 0', ' ')
+
+    lines = [f"🎉 **Steam Sale Event: {event['title']}**"]
+
+    # Steam shouts its category ("FRANCHISE SALE"); shown only when it
+    # adds something the event's own name doesn't already say.
+    label = (event.get('label') or '').strip()
+    descriptor = label.title() if label.isupper() else label
+    if descriptor and descriptor.lower() not in event['title'].lower():
+        lines.append(f"*{descriptor}*")
+
+    lines.append(f"⏳ Ends {ends_text} — **{_format_duration(event['end'] - now)}**")
+
+    if event.get('start'):
+        total_days = max(1, round((event['end'] - event['start']) / 86400))
+        lines.append(f"📅 Runs for {total_days} day{'s' if total_days != 1 else ''} in total")
+
+    lines.append(event['url'])
+    if event.get('image'):
+        lines.append(f"IMAGE: {event['image']}")
+    return chr(10).join(lines)
+
+
+def check_sale_events() -> list[str]:
+    """Announcements for Steam sale events -- franchise, publisher and
+    seasonal sales -- that haven't been announced yet.
+
+    Unlike check_steam_sales this does NOT stay quiet on its first run.
+    That guard exists there because a first check would otherwise dump
+    dozens of already-running per-title discounts at once; sale events
+    number a handful at most, each is individually worth knowing about,
+    and staying silent would mean announcing nothing until the next one
+    happens to start -- possibly weeks later.
+    """
+    try:
+        spotlights = _fetch_sale_event_spotlights()
+    except Exception as e:
+        logger.debug(f"check_sale_events: couldn't read spotlights: {e}")
+        return []
+
+    now = time.time()
+    state = _load_state()
+    announced = {
+        slug: end for slug, end in (state.get('sale_events') or {}).items()
+        # Forget events that have finished, so the file doesn't grow and a
+        # slug Steam ever reuses reads as new next time.
+        if float(end) > now
+    }
+
+    fresh = []
+    for spotlight in spotlights:
+        if spotlight['slug'] in announced:
+            continue
+        details = _fetch_sale_event_details(spotlight)
+        if not details:
+            # Left out of `announced` on purpose: a page that failed to
+            # load should be retried next cycle, not silently written off.
+            continue
+        if details['end'] <= now:
+            continue
+        fresh.append(details)
+
+    # Soonest to finish first -- that's the one worth acting on.
+    fresh.sort(key=lambda e: e['end'])
+    for event in fresh:
+        announced[event['slug']] = event['end']
+
+    state['sale_events'] = announced
+    _save_state(state)
+
+    if not fresh:
+        return []
+
+    messages = [_format_sale_event(event, now) for event in fresh[:MAX_EVENT_ANNOUNCEMENTS]]
+    overflow = fresh[MAX_EVENT_ANNOUNCEMENTS:]
+    if overflow:
+        listed = ", ".join(f"[{e['title']}]({e['url']})" for e in overflow)
+        messages.append(f"🎉 **Also running:** {listed}")
+    return messages
 
 def check_steam_sales() -> list[str]:
     """Returns announcement strings for popular titles newly on sale, and

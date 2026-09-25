@@ -761,12 +761,18 @@ def run_discord_bot():
 
     @tasks.loop(minutes=30.0)
     async def steam_sale_alerts():
+        # Events first: a franchise or seasonal sale is the context for
+        # whatever individual discounts follow it in the same batch.
+        # Shares the steam_sales channel opt-in rather than adding a
+        # separate /setchannel feature -- anyone who wants sale alerts
+        # wants to know a sale event has started.
+        events = await asyncio.to_thread(steam_sales.check_sale_events)
         messages = await asyncio.to_thread(steam_sales.check_steam_sales)
-        if not messages:
+        if not events and not messages:
             return
 
         async def send(channel):
-            for message in messages:
+            for message in events + messages:
                 await _send_announcement(channel, message)
 
         await _broadcast('steam_sales', send)
