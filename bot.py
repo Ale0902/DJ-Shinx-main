@@ -645,10 +645,30 @@ def run_discord_bot():
         feature (via /setchannel) across every guild the bot is in, so a
         single result gets fanned out to everyone who's opted in instead
         of one hardcoded destination."""
-        for channel_id in channel_config.get_all_for_feature(feature).values():
+        # Each destination is isolated: an exception escaping a tasks.loop
+        # body stops that loop for good, so one server where the bot lost
+        # Send Messages/Embed Links (or whose channel was deleted) used to
+        # silently kill the feature for every server after it, and for
+        # every future tick until a restart.
+        for guild_id, channel_id in channel_config.get_all_for_feature(feature).items():
             channel = client.get_channel(channel_id)
-            if channel is not None:
+            if channel is None:
+                try:
+                    channel = await client.fetch_channel(channel_id)
+                except discord.HTTPException as e:
+                    logger.warning(
+                        f"{feature}: can't reach channel {channel_id} in guild {guild_id} "
+                        f"(deleted, or bot lacks View Channel?): {e}"
+                    )
+                    continue
+            try:
                 await send(channel)
+            except discord.HTTPException as e:
+                logger.warning(
+                    f"{feature}: failed to post in #{getattr(channel, 'name', channel_id)} "
+                    f"(guild {guild_id}) -- check the bot's Send Messages / Embed Links "
+                    f"permissions there: {e}"
+                )
 
     @tasks.loop(time=datetime.time(hour=13, minute=0, tzinfo=EASTERN))
     async def sotd():
