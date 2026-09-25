@@ -11,6 +11,7 @@ import responses
 import botFunctions as bf
 import channel_config
 import game_news
+import link_preview
 import llmask
 import memory_db
 import sports
@@ -120,23 +121,38 @@ def _embed(text: str) -> discord.Embed:
 
 
 async def _send_announcement(destination, message: str):
-    """Sends an embed, then re-posts any link in it as plain content so
-    Discord actually unfurls it into a preview card (a link inside an
-    embed's description never unfurls). destination can be a channel or
-    a command Context -- both expose a compatible .send()."""
-    embed = _embed(message)
-    await destination.send(embed=embed)
+    """Sends an announcement as a single embed carrying its link's own
+    artwork -- album art for a Spotify/YouTube track, an article's hero
+    image -- so the link appears once, inside the box, instead of being
+    re-posted underneath purely to make Discord draw a preview card.
 
-    # The bare re-post exists only to make Discord generate a preview card
-    # for the link. An embed that already carries its own artwork doesn't
-    # need one, and posting the URL again underneath just leaves a naked
-    # duplicate link hanging under every announcement.
+    Falls back to that re-post when there's no artwork to be had (the
+    page has none, or it can't be reached), since an unfurled card is
+    still better than a link with nothing attached to it. destination can
+    be a channel or a command Context -- both expose a compatible
+    .send()."""
+    embed = _embed(message)
+
+    # A module that already named its own artwork (Steam, comic covers)
+    # has nothing to look up.
     if embed.thumbnail.url or embed.image.url:
+        await destination.send(embed=embed)
         return
 
     url_match = ANNOUNCEMENT_URL_RE.search(message)
-    if url_match:
-        await destination.send(url_match.group(0))
+    if not url_match:
+        await destination.send(embed=embed)
+        return
+
+    link = url_match.group(0)
+    artwork = await asyncio.to_thread(link_preview.artwork_for, link)
+    if artwork:
+        embed.set_image(url=artwork)
+        await destination.send(embed=embed)
+        return
+
+    await destination.send(embed=embed)
+    await destination.send(link)
 
 # Commands that work normally but are left out of /help entirely -- easter
 # eggs that only show up if you already know about them.
