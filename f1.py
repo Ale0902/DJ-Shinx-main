@@ -4,6 +4,7 @@ import json
 import time
 import logging
 import datetime
+import threading
 import concurrent.futures
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -46,6 +47,140 @@ RACE_DAY_BANNERS = {'Race': "RACE", 'SR': "SPRINT RACE"}
 # session's results). Reused across calls instead of spinning up a fresh
 # pool per invocation.
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=32)
+
+
+# Discord renders only a small ANSI subset inside a ```ansi block: eight
+# foreground colours plus a bold flag. The 2026 grid has eleven teams, so
+# bold is used as a second dimension -- each hue carries at most two
+# teams, paired so the two are easy to tell apart (Ferrari red vs Haas
+# bold red, Red Bull blue vs Williams bold blue).
+ANSI_RESET = "\u001b[0m"
+_RED = "\u001b[0;31m"
+_BOLD_RED = "\u001b[1;31m"
+_GREEN = "\u001b[0;32m"
+_BOLD_GREEN = "\u001b[1;32m"
+_YELLOW = "\u001b[0;33m"
+_BLUE = "\u001b[0;34m"
+_BOLD_BLUE = "\u001b[1;34m"
+_PINK = "\u001b[0;35m"
+_CYAN = "\u001b[0;36m"
+_BOLD_CYAN = "\u001b[1;36m"
+_WHITE = "\u001b[0;37m"
+
+# Keyed by the team names ESPN actually returns. Each is mapped to the
+# closest thing the palette has to the real livery.
+TEAM_COLORS = {
+    'Ferrari': _RED,
+    'Haas': _BOLD_RED,
+    'Aston Martin': _GREEN,
+    'Audi': _BOLD_GREEN,
+    'McLaren': _YELLOW,          # papaya; yellow is the nearest available
+    'Red Bull': _BLUE,
+    'Williams': _BOLD_BLUE,
+    'Mercedes': _CYAN,           # petronas teal
+    'Racing Bulls': _BOLD_CYAN,
+    'Alpine': _PINK,
+    'Cadillac': _WHITE,
+}
+
+# ESPN has renamed teams mid-era before (Toro Rosso -> AlphaTauri -> RB ->
+# Racing Bulls, Sauber -> Kick Sauber -> Audi). Rather than lose a team's
+# colour the day that happens, these older and alternate spellings map
+# onto whichever current entry they became.
+TEAM_ALIASES = {
+    'kick sauber': 'Audi',
+    'sauber': 'Audi',
+    'stake': 'Audi',
+    'alphatauri': 'Racing Bulls',
+    'toro rosso': 'Racing Bulls',
+    'rb': 'Racing Bulls',
+    'red bull racing': 'Red Bull',
+    'alfa romeo': 'Audi',
+    'force india': 'Aston Martin',
+    'racing point': 'Aston Martin',
+    'renault': 'Alpine',
+}
+
+# Longest first, so "Racing Bulls" is tested before "Red Bull" and a name
+# containing both words can't match the shorter one by accident.
+_TEAM_MATCH_ORDER = sorted(TEAM_COLORS, key=len, reverse=True)
+
+# A driver's team comes from their athlete record, one request each, so
+# it's cached well past a race weekend -- a seat changes at most a couple
+# of times a season and a restart re-reads it anyway.
+_DRIVER_TEAM_TTL_SECONDS = 12 * 3600
+_driver_team_cache: dict[str, tuple[float, str | None]] = {}
+_driver_team_lock = threading.Lock()
+
+
+def team_color(team_name: str | None) -> str | None:
+    """The ANSI code for a team, matched leniently so a renamed or
+    slightly differently spelled team still gets its colour instead of
+    silently falling back to plain text."""
+    if not team_name:
+        return None
+    if team_name in TEAM_COLORS:
+        return TEAM_COLORS[team_name]
+
+    lowered = team_name.lower()
+    for alias, canonical in TEAM_ALIASES.items():
+        if alias in lowered:
+            return TEAM_COLORS.get(canonical)
+    for known in _TEAM_MATCH_ORDER:
+        if known.lower() in lowered:
+            return TEAM_COLORS[known]
+    return None
+
+
+def _colorize(text: str, code: str | None) -> str:
+    return text if code is None else f"{code}{text}{ANSI_RESET}"
+
+
+def _fetch_driver_team(athlete_id: str) -> str | None:
+    """The team a driver currently races for. Their athlete record is the
+    only place ESPN exposes this -- neither the standings entries nor a
+    session's competitors carry a team at all."""
+    try:
+        data = _fetch_json(f"{F1_CORE_BASE}/athletes/{athlete_id}")
+        vehicles = data.get('vehicles') or []
+        return (vehicles[0].get('team') if vehicles else None) or None
+    except Exception as e:
+        logger.debug(f"_fetch_driver_team failed for athlete {athlete_id}: {e}")
+        return None
+
+
+def driver_teams(athlete_ids: list[str]) -> dict[str, str | None]:
+    """{athlete_id: team_name} for a whole table at once. One request per
+    driver not already cached, run in parallel -- a full 23-driver grid
+    takes about a second cold and nothing at all afterwards."""
+    now = time.time()
+    known: dict[str, str | None] = {}
+    missing = []
+
+    with _driver_team_lock:
+        for athlete_id in athlete_ids:
+            cached = _driver_team_cache.get(athlete_id)
+            if cached and now - cached[0] < _DRIVER_TEAM_TTL_SECONDS:
+                known[athlete_id] = cached[1]
+            else:
+                missing.append(athlete_id)
+
+    if missing:
+        fetched = list(_executor.map(_fetch_driver_team, missing))
+        with _driver_team_lock:
+            for athlete_id, team in zip(missing, fetched):
+                _driver_team_cache[athlete_id] = (now, team)
+                known[athlete_id] = team
+
+    return known
+
+
+def _driver_cell(name: str, width: int, team: str | None) -> str:
+    """A fixed-width driver name, coloured by team. Padded *before* the
+    escape codes go on: ANSI sequences are characters too, so colouring
+    first and padding after makes every coloured cell count ~11 invisible
+    characters toward its width and pulls the column out of line."""
+    return _colorize(f"{name:<{width}.{width}}", team_color(team))
 
 # Short-lived cache, mirroring sports.py's -- avoids duplicate round-trips
 # to ESPN's unofficial API within the same poll/command (e.g. the grid
@@ -107,15 +242,17 @@ def _event_location(event_id: str) -> str | None:
         return None
 
 
-def _competitor_result(event_id: str, competition_id: str, competitor: dict) -> tuple[str, str, str] | None:
-    """Returns (place, driver_name, total_time) for one driver in a
-    session, or None if it can't be fetched."""
+def _competitor_result(event_id: str, competition_id: str, competitor: dict) -> tuple[str, str, str, str] | None:
+    """Returns (place, driver_name, total_time, athlete_id) for one driver
+    in a session, or None if it can't be fetched. The athlete id rides
+    along so the row can be coloured by the driver's team -- a session's
+    competitors carry no team of their own."""
     try:
         url = f"{F1_CORE_BASE}/events/{event_id}/competitions/{competition_id}/competitors/{competitor['id']}/statistics"
         data = _fetch_json(url)
         stats = {s['name']: s['displayValue'] for s in data['splits']['categories'][0]['stats']}
         name = competitor['athlete']['displayName']
-        return stats.get('place', '-'), name, stats.get('totalTime', '-')
+        return stats.get('place', '-'), name, stats.get('totalTime', '-'), str(competitor['id'])
     except Exception as e:
         logger.debug(f"_competitor_result failed for competitor {competitor.get('id')}: {e}")
         return None
@@ -129,7 +266,7 @@ def _session_results_table(event_id: str, competition: dict) -> str | None:
     if not competitors:
         return None
 
-    def fetch(competitor: dict) -> tuple[str, str, str] | None:
+    def fetch(competitor: dict) -> tuple[str, str, str, str] | None:
         return _competitor_result(event_id, competition['id'], competitor)
 
     results = [r for r in _executor.map(fetch, competitors) if r]
@@ -137,7 +274,7 @@ def _session_results_table(event_id: str, competition: dict) -> str | None:
     if not results:
         return None
 
-    def sort_key(result: tuple[str, str, str]) -> int:
+    def sort_key(result: tuple[str, str, str, str]) -> int:
         try:
             return int(float(result[0]))
         except (TypeError, ValueError):
@@ -145,12 +282,15 @@ def _session_results_table(event_id: str, competition: dict) -> str | None:
 
     results.sort(key=sort_key)
 
+    teams = driver_teams([athlete_id for _, _, _, athlete_id in results])
+
     header = f"{'Pos':>3}  {'Driver':<22} Time"
     rows = [header, '-' * len(header)]
-    for place, name, total_time in results:
-        rows.append(f"{place:>3}  {name:<22} {total_time}")
+    for place, name, total_time, athlete_id in results:
+        driver = _driver_cell(name, 22, teams.get(athlete_id))
+        rows.append(f"{place:>3}  {driver} {total_time}")
 
-    return "```\n" + "\n".join(rows) + "\n```"
+    return "```ansi\n" + "\n".join(rows) + "\n```"
 
 
 def _grid_recap(event_id: str, competitions: list[dict], race_abbrev: str) -> str | None:
@@ -275,6 +415,16 @@ def f1_status() -> str:
     )
 
 
+def _standings_team(entry: dict, teams: dict[str, str | None]) -> str | None:
+    """Which team's colour a standings row takes. A constructor row is its
+    own team; a driver row borrows the team they race for, so teammates
+    sit in the table as a matching pair."""
+    if 'team' in entry:
+        return entry['team'].get('displayName')
+    athlete_id = str((entry.get('athlete') or {}).get('id', ''))
+    return teams.get(athlete_id)
+
+
 def _f1_standings_table(title: str, entries: list[dict], name_fn: Callable[[dict], str]) -> str:
     def stat_map(entry: dict) -> dict:
         return {stat['name']: stat.get('displayValue') for stat in entry['stats']}
@@ -287,16 +437,24 @@ def _f1_standings_table(title: str, entries: list[dict], name_fn: Callable[[dict
 
     entries = sorted(entries, key=sort_key)
 
+    # Only the driver table needs the lookup; a constructor entry already
+    # names its own team, so this comes back empty and costs nothing.
+    teams = driver_teams([
+        str(entry['athlete']['id']) for entry in entries
+        if 'team' not in entry and (entry.get('athlete') or {}).get('id')
+    ])
+
     header = f"{'#':>2} {'Name':<24} {'Pts':>4}"
     rows = [header, '-' * len(header)]
     for entry in entries:
         stats = stat_map(entry)
         rank = stats.get('rank', '-')
         points = stats.get('championshipPts') or stats.get('points') or '-'
-        rows.append(f"{rank:>2} {name_fn(entry):<24.24} {points:>4}")
+        name = _driver_cell(name_fn(entry), 24, _standings_team(entry, teams))
+        rows.append(f"{rank:>2} {name} {points:>4}")
 
     table = "\n".join(rows)
-    return f"## {title}\n```\n{table}\n```"
+    return f"## {title}\n```ansi\n{table}\n```"
 
 
 def f1_standings() -> list[str]:
