@@ -242,6 +242,109 @@ def _format_game_line(
         return f"{lead}{day_prefix}{matchup} — {_format_time(game_time)}"
 
 
+
+# A Discord embed is a fixed width, so the only way to stop a slate
+# wrapping is to spend fewer characters per row. The old one-line-per-game
+# format spent most of its width on things that repeat identically down
+# the whole list -- a 🏈 on every row, "Sunday (09/27): " on every row,
+# "(Final)" on every row of a results list -- and pushed each matchup onto
+# a second line, so sixteen games read as a wall of thirty-two lines.
+#
+# Instead: the date becomes one heading per day, the emoji and the
+# redundant status go, and teams use ESPN's shortDisplayName. NFL
+# nicknames are unique league-wide, so "Panthers" loses nothing over
+# "Carolina Panthers" but is half the width -- 10 characters at most
+# across the league, against 21.
+NFL_NAME_WIDTH = 10
+
+# Wide enough for "35-14" and for the "at" of a game that hasn't kicked
+# off, so scores and fixtures line up in the same column.
+NFL_SCORE_WIDTH = 6
+
+
+def _nfl_day_heading(event: dict) -> str:
+    kickoff = datetime.datetime.fromisoformat(event['date'].replace('Z', '+00:00')).astimezone(EASTERN)
+    return kickoff.strftime('%A, %b %d').replace(' 0', ' ')
+
+
+def _short_team_name(competitor: dict) -> str:
+    team = competitor['team']
+    return team.get('shortDisplayName') or team.get('name') or team['displayName']
+
+
+def _format_nfl_row(event: dict) -> str:
+    """One game as a fixed-width row: away team, score (or "at"), home
+    team, then whatever still needs saying -- the quarter and clock for a
+    live game, the kickoff time for an upcoming one, "OT" for a game that
+    needed it. A plain "Final" is left off: in a results list every row is
+    final, and the heading already says so."""
+    competition = event['competitions'][0]
+    competitors = competition['competitors']
+    home = next(c for c in competitors if c['homeAway'] == 'home')
+    away = next(c for c in competitors if c['homeAway'] == 'away')
+
+    status = competition.get('status', {})
+    state = status.get('type', {}).get('state', 'pre')
+
+    if state == 'pre':
+        kickoff = datetime.datetime.fromisoformat(event['date'].replace('Z', '+00:00')).astimezone(EASTERN)
+        middle = 'at'.center(NFL_SCORE_WIDTH)
+        note = _format_time(kickoff)
+        away_color = home_color = None
+    else:
+        try:
+            away_score, home_score = int(away['score']), int(home['score'])
+        except (KeyError, ValueError, TypeError):
+            away_score = home_score = 0
+        middle = f"{away_score}-{home_score}".center(NFL_SCORE_WIDTH)
+
+        # Only the winner is coloured. Colouring the loser too meant every
+        # row carried two colours, which on a full sixteen-game slate read
+        # as noise rather than as information.
+        away_color = ANSI_GREEN if away_score > home_score else None
+        home_color = ANSI_GREEN if home_score > away_score else None
+
+        if state == 'in':
+            note = f"Q{status.get('period', '')} {status.get('displayClock', '')}".strip()
+        else:
+            detail = status.get('type', {}).get('description', 'Final')
+            # "Final/OT" is worth a mention; a plain "Final" isn't.
+            note = detail.split('/', 1)[1] if '/' in detail else ''
+
+    away_cell = _colorize(f"{_short_team_name(away):<{NFL_NAME_WIDTH}.{NFL_NAME_WIDTH}}", away_color)
+
+    # The home team is the last column, so it's padded only when a note
+    # follows that needs to line up. Padding it regardless would leave
+    # trailing spaces that rstrip can't reach, since a coloured cell ends
+    # with its reset code *after* the padding.
+    home_name = f"{_short_team_name(home):.{NFL_NAME_WIDTH}}"
+    if note:
+        home_name = f"{home_name:<{NFL_NAME_WIDTH}}"
+    home_cell = _colorize(home_name, home_color)
+
+    row = f"{away_cell} {middle} {home_cell}"
+    return f"{row} {note}" if note else row
+
+
+def _nfl_lines_by_day(events: list[dict], show_days: bool = True) -> list[str]:
+    """Rows grouped under one heading per day, in kickoff order. Each
+    group is a single entry so _chunk_ansi_block can't split a heading
+    away from the games beneath it."""
+    events = sorted(events, key=lambda e: e['date'])
+    if not show_days:
+        return [_format_nfl_row(event) for event in events]
+
+    groups: dict[str, list[str]] = {}
+    for event in events:
+        groups.setdefault(_nfl_day_heading(event), []).append(_format_nfl_row(event))
+
+    blocks = []
+    for heading, rows in groups.items():
+        # Bold rather than markdown ** -- inside an ansi block the
+        # asterisks would show up literally.
+        blocks.append(_colorize(heading, ANSI_BOLD_WHITE) + chr(10) + chr(10).join(rows))
+    return blocks
+
 def nfl_synopsis() -> list[str]:
     """Returns this week's NFL games with live/final scores as a list of
     Discord-ready message chunks."""
@@ -260,8 +363,7 @@ def nfl_synopsis() -> list[str]:
     week_number = data.get('week', {}).get('number')
     header = f"## NFL Week {week_number} Games!" if week_number else "## This Week's NFL Games!"
 
-    lines = [_format_game_line(event) for event in events]
-    return _chunk_ansi_block(header, lines)
+    return _chunk_ansi_block(header, _nfl_lines_by_day(events))
 
 
 def nfl_live_matches() -> list[str]:
@@ -279,8 +381,7 @@ def nfl_live_matches() -> list[str]:
     if not events:
         return ["No NFL games currently in progress."]
 
-    lines = [_format_game_line(event) for event in events]
-    return _chunk_ansi_block("## Live NFL Right Now!", lines)
+    return _chunk_ansi_block("## Live NFL Right Now!", _nfl_lines_by_day(events, show_days=False))
 
 
 def nfl_results_this_week() -> list[str]:
@@ -300,8 +401,7 @@ def nfl_results_this_week() -> list[str]:
     if not events:
         return ["No NFL games have finished yet this week."]
 
-    lines = [_format_game_line(event) for event in events]
-    return _chunk_ansi_block("## This Week's NFL Results!", lines)
+    return _chunk_ansi_block("## This Week's NFL Results!", _nfl_lines_by_day(events))
 
 
 def _nfl_stat(entry: dict, name: str) -> str | None:
@@ -836,6 +936,7 @@ ANSI_RED = "\u001b[0;31m"
 ANSI_GREEN = "\u001b[0;32m"
 ANSI_BLUE = "\u001b[0;34m"
 ANSI_WHITE = "\u001b[0;37m"
+ANSI_BOLD_WHITE = "\u001b[1;37m"
 
 
 def _colorize(text: str, code: str | None) -> str:
