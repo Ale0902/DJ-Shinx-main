@@ -1,6 +1,8 @@
 import requests
+import re
 import datetime
 import time
+import unicodedata
 import logging
 import concurrent.futures
 from typing import Any, Callable
@@ -163,14 +165,7 @@ def _format_time(dt: datetime.datetime) -> str:
     return dt.strftime('%I:%M %p ET').lstrip('0')
 
 
-def _format_game_line(
-    event: dict, is_soccer: bool = False, label_fn: Callable[[dict], str] | None = None,
-    compact: bool = False,
-) -> str:
-    """compact strips what's constant across every row of a view -- the
-    date, the 🔴 live marker and the leading sport emoji. Only for views
-    where all three repeat identically all the way down and carry no
-    information -- see the note where they're applied below."""
+def _format_game_line(event: dict, is_soccer: bool = False, label_fn: Callable[[dict], str] | None = None) -> str:
     sport_emoji = '⚽' if is_soccer else '🏈'
 
     competition = event['competitions'][0]
@@ -214,33 +209,17 @@ def _format_game_line(
         matchup = f"{away_name} @ {home_name}"
         score = f"{away_score_text}-{home_score_text}"
 
-    # A Discord embed is a fixed width -- there's no way to widen the box,
-    # so the only way to stop lines wrapping is to spend fewer characters
-    # on them. "Thursday (09/24): " and "🔴 " cost ~22 of them on every
-    # single row of /livesoccer, where by definition every match is live
-    # and today, which was enough to wrap nearly every matchup onto a
-    # second line. The header already says both.
-    day_prefix = '' if compact else f"{day_label}: "
-    live_dot = '' if compact else '🔴 '
-    # The leading ⚽ goes too: in /livesoccer the header already says
-    # soccer, and the goal lines indented under each match use ⚽ as their
-    # own bullet, so repeating it on the score line only made the two
-    # collide visually. Unindented + blank-line separated is enough to
-    # mark a score line.
-    lead = '' if compact else f"{sport_emoji} "
-
     if state == 'in':
         clock = status.get('displayClock', '')
         if is_soccer:
-            return f"{lead}{live_dot}{day_prefix}{matchup} {score} ({clock})"
+            return f"{sport_emoji} 🔴 {day_label}: {matchup} {score} ({clock})"
         period = status.get('period', '')
-        return f"{lead}{live_dot}{day_prefix}{matchup} {score} (Q{period}, {clock})"
+        return f"{sport_emoji} 🔴 {day_label}: {matchup} {score} (Q{period}, {clock})"
     elif state == 'post':
         detail = status.get('type', {}).get('description', 'Final')
-        return f"{lead}{day_prefix}{matchup} {score} ({detail})"
+        return f"{sport_emoji} {day_label}: {matchup} {score} ({detail})"
     else:
-        return f"{lead}{day_prefix}{matchup} — {_format_time(game_time)}"
-
+        return f"{sport_emoji} {day_label}: {matchup} — {_format_time(game_time)}"
 
 
 # A Discord embed is a fixed width, so the only way to stop a slate
@@ -812,12 +791,24 @@ def _is_final(event: dict) -> bool:
     return status.get('type', {}).get('state') == 'post'
 
 
-def _match_event_lines(competition: dict) -> list[str]:
-    """Returns "12' ⚽ Player Name (Team)" / "34' 🟥 Player Name (Team)"
-    lines, in chronological order, for every goal and red card in a
-    competition's play-by-play event log ('details')."""
-    team_names = {
-        c['team']['id']: c['team'].get('shortDisplayName') or c['team']['displayName']
+def _match_events(competition: dict) -> list[tuple[str, str, str]]:
+    """(minute, team_code, text) for every goal and red card in a match's
+    play-by-play log ('details'), in chronological order -- e.g. ("43'",
+    "AUT", "⚽ Romano Schmid (pen)").
+
+    Returned unformatted so the caller can size the columns across a whole
+    competition rather than per match; sized per match, a single
+    stoppage-time goal ("90'+4'") shifted that one block's columns out of
+    line with every block around it.
+
+    The side is its three-letter code rather than the full name in
+    brackets after the player: the full name was the widest part of every
+    line and repeated what the score row directly above already says."""
+    team_codes = {
+        c['team']['id']: (
+            c['team'].get('abbreviation')
+            or (c['team'].get('shortDisplayName') or c['team']['displayName'])[:3].upper()
+        )
         for c in competition.get('competitors', [])
     }
 
@@ -831,26 +822,142 @@ def _match_event_lines(competition: dict) -> list[str]:
         clock = detail.get('clock', {})
         scorers = detail.get('athletesInvolved') or []
         name = scorers[0]['displayName'] if scorers else 'Unknown'
-        team_name = team_names.get(detail.get('team', {}).get('id'), '')
+        code = team_codes.get(detail.get('team', {}).get('id'), '')
 
         if is_goal:
             tag = ' (OG)' if detail.get('ownGoal') else ' (pen)' if detail.get('penaltyKick') else ''
-            text = f"⚽ {name}{tag} ({team_name})"
+            text = f"⚽ {name}{tag}"
         else:
-            text = f"🟥 {name} ({team_name})"
+            text = f"🟥 {name}"
 
-        events.append((clock.get('value', 0), f"     {clock.get('displayValue', '')} {text}"))
+        events.append((clock.get('value', 0), clock.get('displayValue', ''), code, text))
 
     events.sort(key=lambda e: e[0])
-    return [line for _, line in events]
+    return [(minute, code, text) for _, minute, code, text in events]
 
 
-def _format_live_soccer_line(event: dict, label_fn: Callable[[dict], str] | None = None) -> str:
-    """A live match's score line plus, indented beneath it, each goal and
-    red card so far with who was involved and the minute it happened."""
-    lines = [_format_game_line(event, is_soccer=True, label_fn=label_fn, compact=True)]
-    lines.extend(_match_event_lines(event['competitions'][0]))
-    return "\n".join(lines)
+_ANSI_ESCAPE_RE = re.compile('\x1b' + r'\[[0-9;]*m')
+
+
+def _display_width(text: str) -> int:
+    """How many monospace cells `text` occupies once Discord renders it,
+    which len() gets wrong in both directions: ANSI escapes are characters
+    that take no space, and a flag is several code points drawn two cells
+    wide. Wales, England and Scotland are the worst of it -- a black flag
+    plus six invisible tag characters, seven code points for two cells --
+    so padding by len() under-pads them by five and drags the whole column
+    out of line."""
+    text = _ANSI_ESCAPE_RE.sub('', text)
+    width = 0
+    i = 0
+    while i < len(text):
+        cp = ord(text[i])
+        if 0x1F1E6 <= cp <= 0x1F1FF:
+            # A regional-indicator pair is one flag.
+            width += 2
+            i += 2
+            continue
+        if cp == 0x1F3F4:
+            # Black flag followed by tag characters (subdivision flags).
+            i += 1
+            while i < len(text) and 0xE0000 <= ord(text[i]) <= 0xE007F:
+                i += 1
+            width += 2
+            continue
+        if cp in (0x200D, 0xFE0F) or unicodedata.combining(text[i]):
+            i += 1  # joiners, variation selectors, accents: no width of their own
+            continue
+        if cp >= 0x1F300 or unicodedata.east_asian_width(text[i]) in ('W', 'F'):
+            width += 2
+        else:
+            width += 1
+        i += 1
+    return width
+
+
+def _pad_display(text: str, width: int) -> str:
+    return text + ' ' * max(0, width - _display_width(text))
+
+
+def _soccer_label(competitor: dict, with_flag: bool) -> str:
+    """ESPN's shortDisplayName ("Rep Ireland" rather than "Republic of
+    Ireland"), with the country's flag for international fixtures. The
+    flag is looked up by the full displayName, which is what
+    COUNTRY_FLAGS is keyed on -- the short form wouldn't find it."""
+    team = competitor['team']
+    short = team.get('shortDisplayName') or team['displayName']
+    if with_flag:
+        flag = COUNTRY_FLAGS.get(team['displayName'])
+        if flag:
+            return f"{flag} {short}"
+    return short
+
+
+def _live_soccer_blocks(events: list[dict], with_flags: bool) -> list[str]:
+    """One block per match -- an aligned score row with its goals and red
+    cards beneath -- laid out like the NFL slates: fixed columns, only the
+    side that's ahead coloured, minute at the end.
+
+    Every column width comes from the widest entry in *this* competition
+    rather than a fixed constant, so a slate of short club names isn't
+    padded out to fit "North Macedonia" and each row stays as narrow as it
+    can -- and the goal lines line up from one match to the next, not just
+    within one. Home stays on the left: soccer lists the home side first,
+    unlike the NFL's away-at-home convention."""
+    rows = []
+    for event in events:
+        competition = event['competitions'][0]
+        competitors = competition['competitors']
+        home = next(c for c in competitors if c['homeAway'] == 'home')
+        away = next(c for c in competitors if c['homeAway'] == 'away')
+        try:
+            home_score, away_score = int(home['score']), int(away['score'])
+        except (KeyError, ValueError, TypeError):
+            home_score = away_score = 0
+        rows.append({
+            'home': _soccer_label(home, with_flags),
+            'away': _soccer_label(away, with_flags),
+            'home_score': home_score,
+            'away_score': away_score,
+            'score': f"{home_score}-{away_score}",
+            'clock': competition.get('status', {}).get('displayClock', ''),
+            'events': _match_events(competition),
+        })
+
+    if not rows:
+        return []
+
+    home_width = max(_display_width(r['home']) for r in rows)
+    away_width = max(_display_width(r['away']) for r in rows)
+    score_width = max(len(r['score']) for r in rows)
+    all_events = [e for r in rows for e in r['events']]
+    minute_width = max((len(minute) for minute, _, _ in all_events), default=0)
+    code_width = max((len(code) for _, code, _ in all_events), default=0)
+
+    blocks = []
+    for r in rows:
+        # A draw colours neither side, same as the NFL rows.
+        home_color = ANSI_GREEN if r['home_score'] > r['away_score'] else None
+        away_color = ANSI_GREEN if r['away_score'] > r['home_score'] else None
+
+        home_cell = _colorize(_pad_display(r['home'], home_width), home_color)
+        away_cell = _colorize(_pad_display(r['away'], away_width), away_color)
+        score = r['score'].center(score_width)
+
+        # Single spaces around the score: the padded name columns already
+        # separate it visually, and each cell spent here is one a long
+        # pairing like Liechtenstein v Lithuania needs to stay on one line.
+        lines = [f"{home_cell} {score} {away_cell}  {r['clock']}".rstrip()]
+        # Minutes left-aligned and padded, so the usual two- and three-
+        # character minutes sit flush with the indent and only the rare
+        # stoppage-time goal takes the extra room, rather than pushing
+        # every other minute rightward to make space for it.
+        lines.extend(
+            f"  {minute:<{minute_width}}  {code:<{code_width}}  {text}"
+            for minute, code, text in r['events']
+        )
+        blocks.append(chr(10).join(lines))
+    return blocks
 
 
 def live_soccer_matches() -> list[str]:
@@ -877,8 +984,7 @@ def live_soccer_matches() -> list[str]:
         events = sorted(live_by_competition[name].values(), key=lambda e: e['date'])
         if not events:
             continue
-        label_fn = _flag_label if name in INTERNATIONAL_COMPETITIONS else None
-        blocks = [_format_live_soccer_line(event, label_fn=label_fn) for event in events]
+        blocks = _live_soccer_blocks(events, with_flags=name in INTERNATIONAL_COMPETITIONS)
         # One blank line between matches. Each block is a score line with
         # its own goals indented underneath, so without a separator the
         # goals of one match butt straight up against the next match's
