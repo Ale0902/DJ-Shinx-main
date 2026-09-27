@@ -49,12 +49,10 @@ RICH_PREVIEW_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Same "re-post as plain content so Discord actually unfurls it" idea as
-# RICH_PREVIEW_URL_RE, but unscoped to specific sites -- game_news.py's
-# announcement links are always a Nintendo Life or PlayStation Blog article
-# (never YouTube/Twitter), and any well-formed news article has its own
-# Open Graph preview card, so there's no need to special-case a domain list
-# the way the native YouTube/tweet embeds above require.
+# The link in an announcement whose artwork _send_announcement looks up
+# (via link_preview) and shows inside the embed. Unscoped to specific sites,
+# unlike RICH_PREVIEW_URL_RE: announcements link to Spotify, YouTube, news
+# articles, Steam and more, and link_preview handles each on its own terms.
 ANNOUNCEMENT_URL_RE = re.compile(r'https?://\S+')
 
 MAX_EMBED_DESC = 4096  # Discord's hard cap on an embed description
@@ -123,36 +121,29 @@ def _embed(text: str) -> discord.Embed:
 async def _send_announcement(destination, message: str):
     """Sends an announcement as a single embed carrying its link's own
     artwork -- album art for a Spotify/YouTube track, an article's hero
-    image -- so the link appears once, inside the box, instead of being
-    re-posted underneath purely to make Discord draw a preview card.
+    image -- so the link appears once, inside the box.
 
-    Falls back to that re-post when there's no artwork to be had (the
-    page has none, or it can't be reached), since an unfurled card is
-    still better than a link with nothing attached to it. destination can
-    be a channel or a command Context -- both expose a compatible
-    .send()."""
+    Always exactly one message. There used to be a fallback that re-posted
+    the bare link underneath when no artwork could be found, so Discord
+    would draw its own preview card instead -- but that's the duplicate
+    link this exists to get rid of, and it fired precisely when the lookup
+    failed, which is when it was least wanted. With no artwork the embed
+    still carries its link, clickable, just without a picture;
+    link_preview logs why, so a run of missing pictures is diagnosable
+    from the bot's log. destination can be a channel or a command Context
+    -- both expose a compatible .send()."""
     embed = _embed(message)
 
     # A module that already named its own artwork (Steam, comic covers)
     # has nothing to look up.
-    if embed.thumbnail.url or embed.image.url:
-        await destination.send(embed=embed)
-        return
-
-    url_match = ANNOUNCEMENT_URL_RE.search(message)
-    if not url_match:
-        await destination.send(embed=embed)
-        return
-
-    link = url_match.group(0)
-    artwork = await asyncio.to_thread(link_preview.artwork_for, link)
-    if artwork:
-        embed.set_image(url=artwork)
-        await destination.send(embed=embed)
-        return
+    if not (embed.thumbnail.url or embed.image.url):
+        url_match = ANNOUNCEMENT_URL_RE.search(message)
+        if url_match:
+            artwork = await asyncio.to_thread(link_preview.artwork_for, url_match.group(0))
+            if artwork:
+                embed.set_image(url=artwork)
 
     await destination.send(embed=embed)
-    await destination.send(link)
 
 # Commands that work normally but are left out of /help entirely -- easter
 # eggs that only show up if you already know about them.
