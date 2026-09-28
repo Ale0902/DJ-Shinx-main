@@ -3,6 +3,7 @@ from discord.ext import commands, tasks
 import asyncio
 import contextlib
 import datetime
+import io
 import logging
 import re
 import time
@@ -67,6 +68,11 @@ MAX_EMBED_DESC = 4096  # Discord's hard cap on an embed description
 # small square in the embed's corner, which rendered a 460x215 store
 # banner at postage-stamp size. set_image gives it the embed's full width.
 IMAGE_MARKER_RE = re.compile(r'^IMAGE:\s*(\S+)\s*$', re.MULTILINE)
+
+# Pixel width /recsong and SOTD album art is shrunk to (see
+# _send_announcement). Raise it for a bigger cover, lower it for smaller;
+# anything past ~400 just fills the embed's full width.
+ALBUM_ART_SIZE = 200
 
 
 def _with_question(question_line: str, body: str) -> str:
@@ -133,6 +139,7 @@ async def _send_announcement(destination, message: str, artwork_as_thumbnail: bo
     from the bot's log. destination can be a channel or a command Context
     -- both expose a compatible .send()."""
     embed = _embed(message)
+    file = None
 
     # A module that already named its own artwork (Steam, comic covers)
     # has nothing to look up.
@@ -141,13 +148,23 @@ async def _send_announcement(destination, message: str, artwork_as_thumbnail: bo
         if url_match:
             artwork = await asyncio.to_thread(link_preview.artwork_for, url_match.group(0))
             if artwork and artwork_as_thumbnail:
-                # A square album cover at full embed width dwarfs the text;
-                # the corner thumbnail suits it, unlike a wide banner.
-                embed.set_thumbnail(url=artwork)
+                # A square album cover at full embed width dwarfs the text,
+                # and the corner thumbnail is too small to make out. An
+                # uploaded pre-shrunk copy is drawn at its own size, in
+                # between; the thumbnail is the fallback if that fails.
+                shrunk = await asyncio.to_thread(link_preview.shrink_artwork, artwork, ALBUM_ART_SIZE)
+                if shrunk:
+                    file = discord.File(io.BytesIO(shrunk), filename="artwork.png")
+                    embed.set_image(url="attachment://artwork.png")
+                else:
+                    embed.set_thumbnail(url=artwork)
             elif artwork:
                 embed.set_image(url=artwork)
 
-    await destination.send(embed=embed)
+    if file:
+        await destination.send(embed=embed, file=file)
+    else:
+        await destination.send(embed=embed)
 
 # Commands that work normally but are left out of /help entirely -- easter
 # eggs that only show up if you already know about them.

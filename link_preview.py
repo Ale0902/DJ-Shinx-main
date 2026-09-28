@@ -248,3 +248,46 @@ def artwork_for(url: str) -> str | None:
             _cache.clear()
         _cache[url] = (now, CACHE_TTL_SECONDS if artwork else MISS_CACHE_TTL_SECONDS, artwork)
     return artwork
+
+
+# Largest download shrink_artwork will accept; a 640px Spotify cover is
+# well under 200KB, so anything past this isn't an album cover.
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+
+def shrink_artwork(image_url: str, size: int) -> bytes | None:
+    """Downloads `image_url` and scales it to fit a `size`-pixel square,
+    returned as PNG bytes -- or None if it can't be fetched or decoded.
+
+    Exists because Discord offers only two picture sizes in an embed: the
+    corner thumbnail, capped at roughly 80px, and the main image, drawn at
+    the embed's full width. The main image is only drawn that large when
+    the file is -- a smaller file is shown at its own size -- so uploading
+    a pre-shrunk copy is the one way to land in between."""
+    from io import BytesIO
+    from PIL import Image
+
+    response = _get(image_url, stream=True)
+    if response is None:
+        return None
+    try:
+        if response.status_code != 200:
+            logger.warning(f"link_preview: artwork {image_url} returned {response.status_code}")
+            return None
+        data = response.raw.read(MAX_IMAGE_BYTES + 1, decode_content=True)
+    finally:
+        response.close()
+    if len(data) > MAX_IMAGE_BYTES:
+        logger.warning(f"link_preview: artwork {image_url} is over {MAX_IMAGE_BYTES} bytes, not shrinking it")
+        return None
+
+    try:
+        with Image.open(BytesIO(data)) as image:
+            image = image.convert('RGBA' if image.mode in ('RGBA', 'LA', 'P') else 'RGB')
+            image.thumbnail((size, size), Image.LANCZOS)
+            out = BytesIO()
+            image.save(out, format='PNG')
+    except Exception as e:
+        logger.warning(f"link_preview: couldn't shrink artwork {image_url}: {e}")
+        return None
+    return out.getvalue()
