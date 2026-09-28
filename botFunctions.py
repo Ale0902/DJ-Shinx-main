@@ -35,7 +35,7 @@ def recsongs() -> str:
 
     row = random.choice(rows)
     return (
-        "### SOTD!:\n"
+        "### SONG OF THE DAY!\n"
         f"\n**Song:** {row['Song Title']}\n"
         f"**Artist:** {row['Artist']}\n"
         f"**Submitted by:** {row['Your name (or tag)']}\n"
