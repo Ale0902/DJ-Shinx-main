@@ -118,7 +118,7 @@ def _embed(text: str) -> discord.Embed:
     return e
 
 
-async def _send_announcement(destination, message: str):
+async def _send_announcement(destination, message: str, artwork_as_thumbnail: bool = False):
     """Sends an announcement as a single embed carrying its link's own
     artwork -- album art for a Spotify/YouTube track, an article's hero
     image -- so the link appears once, inside the box.
@@ -140,7 +140,11 @@ async def _send_announcement(destination, message: str):
         url_match = ANNOUNCEMENT_URL_RE.search(message)
         if url_match:
             artwork = await asyncio.to_thread(link_preview.artwork_for, url_match.group(0))
-            if artwork:
+            if artwork and artwork_as_thumbnail:
+                # A square album cover at full embed width dwarfs the text;
+                # the corner thumbnail suits it, unlike a wide banner.
+                embed.set_thumbnail(url=artwork)
+            elif artwork:
                 embed.set_image(url=artwork)
 
     await destination.send(embed=embed)
@@ -351,7 +355,7 @@ def run_discord_bot():
     async def recsong(ctx: commands.Context):
         await ctx.defer()
         result = await asyncio.to_thread(bf.recsongs)
-        await _send_announcement(ctx, result)
+        await _send_announcement(ctx, result, artwork_as_thumbnail=True)
 
     @client.hybrid_command(name="top5songs", description="Top 5 songs on iTunes charts!")
     async def top5(ctx: commands.Context):
@@ -680,7 +684,7 @@ def run_discord_bot():
     @tasks.loop(time=datetime.time(hour=13, minute=0, tzinfo=EASTERN))
     async def sotd():
         result = await asyncio.to_thread(bf.recsongs)
-        await _broadcast('sotd', lambda channel: _send_announcement(channel, result))
+        await _broadcast('sotd', lambda channel: _send_announcement(channel, result, artwork_as_thumbnail=True))
 
     @tasks.loop(hours=6.0)
     async def new_chapter_announcements():
