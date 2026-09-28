@@ -29,13 +29,27 @@ def topsongs() -> str:
     return "\n".join(lines) + "\n\nSource: https://www.popvortex.com/music/charts/top-100-songs.php"
 
 
-def recsongs() -> str:
+# Headings /recsong picks from at random, so asking for a song feels like
+# a recommendation rather than the daily post repeated on demand.
+RECSONG_HEADINGS = [
+    "Here's a good one!",
+    "This one is pretty popular!",
+    "I like this one!",
+    "Give this one a listen!",
+    "You might like this one!",
+    "This one's a banger!",
+    "Try this one out!",
+    "One of my favorites!",
+]
+
+
+def recsongs(heading: str = "SONG OF THE DAY!") -> str:
     with open(os.path.join(BASE, 'SOTD.csv'), 'r', encoding='utf-8') as csvfile:
         rows = list(csv.DictReader(csvfile))
 
     row = random.choice(rows)
     return (
-        "### SONG OF THE DAY!\n"
+        f"### {heading}\n"
         f"\n**Song:** {row['Song Title']}\n"
         f"**Artist:** {row['Artist']}\n"
         f"**Submitted by:** {row['Your name (or tag)']}\n"

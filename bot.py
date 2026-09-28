@@ -5,6 +5,7 @@ import contextlib
 import datetime
 import io
 import logging
+import random
 import re
 import time
 from zoneinfo import ZoneInfo
@@ -371,7 +372,7 @@ def run_discord_bot():
     @client.hybrid_command(name="recsong", description="Recommends a random song from the server's list")
     async def recsong(ctx: commands.Context):
         await ctx.defer()
-        result = await asyncio.to_thread(bf.recsongs)
+        result = await asyncio.to_thread(bf.recsongs, random.choice(bf.RECSONG_HEADINGS))
         await _send_announcement(ctx, result, artwork_as_thumbnail=True)
 
     @client.hybrid_command(name="top5songs", description="Top 5 songs on iTunes charts!")
