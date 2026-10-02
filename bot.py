@@ -384,8 +384,7 @@ async def _take_bet(ctx: commands.Context, bet: int) -> bool:
             f"You only have {economy.format_coins(coins)} — not enough to bet "
             f"{economy.format_coins(bet)}. /work pays **{economy.WORK_MIN}–{economy.WORK_MAX}** "
             f"{economy.COIN} every {economy.WORK_EVERY}, and /mine pays "
-            f"**{economy.MINE_MIN}–{economy.MINE_MAX}** {economy.COIN} every "
-            f"{economy.MINE_COOLDOWN_MINUTES} minutes."
+            f"**{economy.MINE_MIN}–{economy.MINE_MAX}** {economy.COIN} any time."
         ),
         ephemeral=True,
     )
@@ -817,16 +816,11 @@ def run_discord_bot():
 
     @client.hybrid_command(
         name="mine",
-        description=f"Earn {economy.MINE_MIN}–{economy.MINE_MAX} coins — every {economy.MINE_COOLDOWN_MINUTES} minutes",
+        description=f"Earn {economy.MINE_MIN}–{economy.MINE_MAX} coins — no cooldown",
     )
     @commands.guild_only()
     async def mine(ctx: commands.Context):
-        result = economy.mine(ctx.guild.id, ctx.author.id)
-        if result is None:
-            wait = economy.format_duration(economy.time_until_next_mine(ctx.guild.id, ctx.author.id))
-            await ctx.send(embed=_embed(f"Your pickaxe needs a rest. You can mine again in **{wait}**."), ephemeral=True)
-            return
-        earned, coins = result
+        earned, coins = economy.mine(ctx.guild.id, ctx.author.id)
         find = random.choice(economy.MINE_FINDS)
         await ctx.send(embed=_embed(
             f"⛏️ You dug up {find} and sold it for {economy.format_coins(earned)}.\n"

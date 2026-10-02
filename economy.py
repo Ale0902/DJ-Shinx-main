@@ -1,5 +1,5 @@
 """A play-money economy for each server: /work pays a random amount every
-hour and /mine a smaller one every 15 minutes, and slots, roulette and
+hour and /mine a smaller one as often as you like, and slots, roulette and
 blackjack let people bet it to try to grow it. Coins are worth nothing outside the bot and can't be bought.
 
 Every server has its own separate economy -- balances are keyed by
@@ -59,10 +59,9 @@ WORK_JOBS = [
     "you saved a nearby planet and its inhabitants were thankful"
 ]
 
-# /mine pays less than /work, but on a much shorter cooldown.
+# /mine pays less than /work, but has no cooldown at all.
 MINE_MIN = 15
 MINE_MAX = 60
-MINE_COOLDOWN_MINUTES = 15
 
 # Flavor text for /mine -- unrelated to how much it pays.
 MINE_FINDS = [
@@ -91,11 +90,8 @@ def connect() -> sqlite3.Connection:
         "user_id TEXT NOT NULL, "
         "balance INTEGER NOT NULL DEFAULT 0, "
         "last_work TEXT, "  # UTC time of the last /work, e.g. '2026-10-01T19:30:00+00:00'
-        "last_mine TEXT, "  # UTC time of the last /mine, same format
         "PRIMARY KEY (guild_id, user_id))"
     )
-    if 'last_mine' not in {column[1] for column in conn.execute("PRAGMA table_info(wallets)")}:
-        conn.execute("ALTER TABLE wallets ADD COLUMN last_mine TEXT")  # a wallets table from before /mine
     return conn
 
 
@@ -136,7 +132,6 @@ def get_balance(guild_id, user_id) -> int:
 
 
 WORK_COOLDOWN = datetime.timedelta(hours=WORK_COOLDOWN_HOURS)
-MINE_COOLDOWN = datetime.timedelta(minutes=MINE_COOLDOWN_MINUTES)
 
 
 def _timestamp(moment: datetime.datetime) -> str:
@@ -147,60 +142,45 @@ def _timestamp(moment: datetime.datetime) -> str:
     return moment.astimezone(datetime.timezone.utc).isoformat(timespec='seconds')
 
 
-def _earn(guild_id, user_id, column: str, low: int, high: int, cooldown: datetime.timedelta) -> tuple[int, int] | None:
-    """Pays between low and high coins if the time in this user's `column`
-    (last_work or last_mine) is at least `cooldown` ago, and stamps it with
-    now. Returns (amount earned, new balance), or None if it's too soon.
-    A single statement does both the check and the payment, so two calls
-    landing at once can't both pay out."""
-    earned = random.randint(low, high)
+def work(guild_id, user_id) -> tuple[int, int] | None:
+    """Pays between WORK_MIN and WORK_MAX coins if this user hasn't worked
+    in this server in the last WORK_COOLDOWN_HOURS. Returns (amount
+    earned, new balance), or None if they have. A single statement does
+    both the check and the payment, so two /work calls landing at once
+    can't both pay out."""
+    earned = random.randint(WORK_MIN, WORK_MAX)
     now = datetime.datetime.now(datetime.timezone.utc)
     with connect() as conn:
         cursor = conn.execute(
-            f"INSERT INTO wallets (guild_id, user_id, balance, {column}) VALUES (?, ?, ?, ?) "
+            "INSERT INTO wallets (guild_id, user_id, balance, last_work) VALUES (?, ?, ?, ?) "
             "ON CONFLICT (guild_id, user_id) DO UPDATE SET "
-            f"balance = balance + excluded.balance, {column} = excluded.{column} "
-            f"WHERE wallets.{column} IS NULL OR wallets.{column} <= ?",
-            (str(guild_id), str(user_id), earned, _timestamp(now), _timestamp(now - cooldown)),
+            "balance = balance + excluded.balance, last_work = excluded.last_work "
+            "WHERE wallets.last_work IS NULL OR wallets.last_work <= ?",
+            (str(guild_id), str(user_id), earned, _timestamp(now), _timestamp(now - WORK_COOLDOWN)),
         )
         if cursor.rowcount == 0:
             return None
     return earned, get_balance(guild_id, user_id)
 
 
-def _time_until_earn(guild_id, user_id, column: str, cooldown: datetime.timedelta) -> datetime.timedelta:
-    """How long until _earn on this column pays again -- zero if it already would."""
+def time_until_next_work(guild_id, user_id) -> datetime.timedelta:
+    """How long until this user's next /work pays -- zero if it already would."""
     with connect() as conn:
         row = conn.execute(
-            f"SELECT {column} FROM wallets WHERE guild_id = ? AND user_id = ?",
+            "SELECT last_work FROM wallets WHERE guild_id = ? AND user_id = ?",
             (str(guild_id), str(user_id)),
         ).fetchone()
-    if not row or not row[0] or 'T' not in row[0]:  # never used, or a last_work from the once-a-day rule
+    if not row or not row[0] or 'T' not in row[0]:  # never worked, or only under the old once-a-day rule
         return datetime.timedelta(0)
-    ready_at = datetime.datetime.fromisoformat(row[0]) + cooldown
-    return max(ready_at - datetime.datetime.now(datetime.timezone.utc), datetime.timedelta(0))
+    next_shift = datetime.datetime.fromisoformat(row[0]) + WORK_COOLDOWN
+    return max(next_shift - datetime.datetime.now(datetime.timezone.utc), datetime.timedelta(0))
 
 
-def work(guild_id, user_id) -> tuple[int, int] | None:
-    """Pays WORK_MIN–WORK_MAX coins if this user hasn't worked in this
-    server in the last WORK_COOLDOWN_HOURS. Returns (amount earned, new
-    balance), or None if they have."""
-    return _earn(guild_id, user_id, 'last_work', WORK_MIN, WORK_MAX, WORK_COOLDOWN)
-
-
-def time_until_next_work(guild_id, user_id) -> datetime.timedelta:
-    return _time_until_earn(guild_id, user_id, 'last_work', WORK_COOLDOWN)
-
-
-def mine(guild_id, user_id) -> tuple[int, int] | None:
-    """Pays MINE_MIN–MINE_MAX coins if this user hasn't mined in this
-    server in the last MINE_COOLDOWN_MINUTES. Separate from /work's
-    cooldown, so using one never holds up the other."""
-    return _earn(guild_id, user_id, 'last_mine', MINE_MIN, MINE_MAX, MINE_COOLDOWN)
-
-
-def time_until_next_mine(guild_id, user_id) -> datetime.timedelta:
-    return _time_until_earn(guild_id, user_id, 'last_mine', MINE_COOLDOWN)
+def mine(guild_id, user_id) -> tuple[int, int]:
+    """Pays MINE_MIN–MINE_MAX coins, as often as the user likes. Returns
+    (amount earned, new balance)."""
+    earned = random.randint(MINE_MIN, MINE_MAX)
+    return earned, pay(guild_id, user_id, earned)
 
 
 def _transaction(conn: sqlite3.Connection | None):
