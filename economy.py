@@ -1,6 +1,6 @@
 """A play-money economy for each server: /work pays a random amount every
-two hours, and slots, roulette and blackjack let people bet it to try to grow
-it. Coins are worth nothing outside the bot and can't be bought.
+two hours and /mine a smaller one every 15 minutes, and slots, roulette and
+blackjack let people bet it to try to grow it. Coins are worth nothing outside the bot and can't be bought.
 
 Every server has its own separate economy -- balances are keyed by
 (guild, user), so a leaderboard only ranks people in that server and
@@ -57,6 +57,27 @@ WORK_JOBS = [
     "you saved a nearby planet and its inhabitants were thankful"
 ]
 
+# /mine pays less than /work, but on a much shorter cooldown.
+MINE_MIN = 15
+MINE_MAX = 60
+MINE_COOLDOWN_MINUTES = 15
+
+# Flavor text for /mine -- unrelated to how much it pays.
+MINE_FINDS = [
+    "a lump of coal",
+    "some copper ore",
+    "a handful of iron nuggets",
+    "a cracked geode",
+    "a thin vein of silver",
+    "a chunk of amethyst",
+    "a suspiciously shiny rock",
+    "a diamond (okay, a really shiny pebble)",
+    "an ancient fossil",
+    "an old miner's lost pocket watch",
+    "a gold flake the size of a crumb",
+    "a perfectly round stone",
+]
+
 
 def connect() -> sqlite3.Connection:
     """Opens the economy database. Shared with sportsbook.py, which keeps
@@ -68,8 +89,11 @@ def connect() -> sqlite3.Connection:
         "user_id TEXT NOT NULL, "
         "balance INTEGER NOT NULL DEFAULT 0, "
         "last_work TEXT, "  # UTC time of the last /work, e.g. '2026-10-01T19:30:00+00:00'
+        "last_mine TEXT, "  # UTC time of the last /mine, same format
         "PRIMARY KEY (guild_id, user_id))"
     )
+    if 'last_mine' not in {column[1] for column in conn.execute("PRAGMA table_info(wallets)")}:
+        conn.execute("ALTER TABLE wallets ADD COLUMN last_mine TEXT")  # a wallets table from before /mine
     return conn
 
 
@@ -109,7 +133,11 @@ def get_balance(guild_id, user_id) -> int:
     return row[0] if row else 0
 
 
-def _work_timestamp(moment: datetime.datetime) -> str:
+WORK_COOLDOWN = datetime.timedelta(hours=WORK_COOLDOWN_HOURS)
+MINE_COOLDOWN = datetime.timedelta(minutes=MINE_COOLDOWN_MINUTES)
+
+
+def _timestamp(moment: datetime.datetime) -> str:
     # Always the same UTC format, so two of these compare correctly as
     # plain text inside SQL. A last_work saved back when /work was once a
     # day is a bare date like '2026-10-01', which sorts before any of
@@ -117,39 +145,60 @@ def _work_timestamp(moment: datetime.datetime) -> str:
     return moment.astimezone(datetime.timezone.utc).isoformat(timespec='seconds')
 
 
-def work(guild_id, user_id) -> tuple[int, int] | None:
-    """Pays between WORK_MIN and WORK_MAX coins if this user hasn't worked
-    in this server in the last WORK_COOLDOWN_HOURS. Returns (amount
-    earned, new balance), or None if they have. A single statement does
-    both the check and the payment, so two /work calls landing at once
-    can't both pay out."""
-    earned = random.randint(WORK_MIN, WORK_MAX)
+def _earn(guild_id, user_id, column: str, low: int, high: int, cooldown: datetime.timedelta) -> tuple[int, int] | None:
+    """Pays between low and high coins if the time in this user's `column`
+    (last_work or last_mine) is at least `cooldown` ago, and stamps it with
+    now. Returns (amount earned, new balance), or None if it's too soon.
+    A single statement does both the check and the payment, so two calls
+    landing at once can't both pay out."""
+    earned = random.randint(low, high)
     now = datetime.datetime.now(datetime.timezone.utc)
-    cooldown_start = now - datetime.timedelta(hours=WORK_COOLDOWN_HOURS)
     with connect() as conn:
         cursor = conn.execute(
-            "INSERT INTO wallets (guild_id, user_id, balance, last_work) VALUES (?, ?, ?, ?) "
+            f"INSERT INTO wallets (guild_id, user_id, balance, {column}) VALUES (?, ?, ?, ?) "
             "ON CONFLICT (guild_id, user_id) DO UPDATE SET "
-            "balance = balance + excluded.balance, last_work = excluded.last_work "
-            "WHERE wallets.last_work IS NULL OR wallets.last_work <= ?",
-            (str(guild_id), str(user_id), earned, _work_timestamp(now), _work_timestamp(cooldown_start)),
+            f"balance = balance + excluded.balance, {column} = excluded.{column} "
+            f"WHERE wallets.{column} IS NULL OR wallets.{column} <= ?",
+            (str(guild_id), str(user_id), earned, _timestamp(now), _timestamp(now - cooldown)),
         )
         if cursor.rowcount == 0:
             return None
     return earned, get_balance(guild_id, user_id)
 
 
-def time_until_next_work(guild_id, user_id) -> datetime.timedelta:
-    """How long until this user's next /work pays -- zero if it already would."""
+def _time_until_earn(guild_id, user_id, column: str, cooldown: datetime.timedelta) -> datetime.timedelta:
+    """How long until _earn on this column pays again -- zero if it already would."""
     with connect() as conn:
         row = conn.execute(
-            "SELECT last_work FROM wallets WHERE guild_id = ? AND user_id = ?",
+            f"SELECT {column} FROM wallets WHERE guild_id = ? AND user_id = ?",
             (str(guild_id), str(user_id)),
         ).fetchone()
-    if not row or not row[0] or 'T' not in row[0]:  # never worked, or only under the old once-a-day rule
+    if not row or not row[0] or 'T' not in row[0]:  # never used, or a last_work from the once-a-day rule
         return datetime.timedelta(0)
-    next_shift = datetime.datetime.fromisoformat(row[0]) + datetime.timedelta(hours=WORK_COOLDOWN_HOURS)
-    return max(next_shift - datetime.datetime.now(datetime.timezone.utc), datetime.timedelta(0))
+    ready_at = datetime.datetime.fromisoformat(row[0]) + cooldown
+    return max(ready_at - datetime.datetime.now(datetime.timezone.utc), datetime.timedelta(0))
+
+
+def work(guild_id, user_id) -> tuple[int, int] | None:
+    """Pays WORK_MIN–WORK_MAX coins if this user hasn't worked in this
+    server in the last WORK_COOLDOWN_HOURS. Returns (amount earned, new
+    balance), or None if they have."""
+    return _earn(guild_id, user_id, 'last_work', WORK_MIN, WORK_MAX, WORK_COOLDOWN)
+
+
+def time_until_next_work(guild_id, user_id) -> datetime.timedelta:
+    return _time_until_earn(guild_id, user_id, 'last_work', WORK_COOLDOWN)
+
+
+def mine(guild_id, user_id) -> tuple[int, int] | None:
+    """Pays MINE_MIN–MINE_MAX coins if this user hasn't mined in this
+    server in the last MINE_COOLDOWN_MINUTES. Separate from /work's
+    cooldown, so using one never holds up the other."""
+    return _earn(guild_id, user_id, 'last_mine', MINE_MIN, MINE_MAX, MINE_COOLDOWN)
+
+
+def time_until_next_mine(guild_id, user_id) -> datetime.timedelta:
+    return _time_until_earn(guild_id, user_id, 'last_mine', MINE_COOLDOWN)
 
 
 def _transaction(conn: sqlite3.Connection | None):
