@@ -287,7 +287,7 @@ def win_probabilities(odds: dict[int, float]) -> dict[int, float]:
     return {number: p / total for number, p in implied.items()}
 
 
-def _percent(probability: float | None) -> str:
+def percent(probability: float | None) -> str:
     if probability is None:
         return '-'
     if probability < 0.005:
@@ -351,7 +351,7 @@ def _field_table(runners: list[Runner], odds: dict[int, float], probabilities: d
         if probability is None:
             odds_text, win_text = 'SCR', '-'
         else:
-            odds_text, win_text = f"{odds[runner.number]:.1f}", _percent(probability)
+            odds_text, win_text = f"{odds[runner.number]:.1f}", percent(probability)
         rows.append(f"{number:>2} {runner.name:<18.18} {runner.jockey:<11.11} {odds_text:>5} {win_text:>4}")
     return "```\n" + "\n".join(rows) + "\n```"
 
@@ -367,8 +367,29 @@ def _race_block(race: Race) -> str | None:
     odds, status, as_of = _win_odds(race.race_id)
     probabilities = win_probabilities(odds)
     table = _field_table(runners, odds, probabilities)
-    note = f"\n{_odds_note(status, as_of)}" if probabilities else ""
+    note = f"\n{_odds_note(status, as_of)}\n{BET_PROMPT}" if probabilities else ""
     return f"{_race_heading(race, english_name)}\n{table}{note}"
+
+
+BET_PROMPT = "🎟️ Bet coins on a horse with /horsebet — betting closes at post time."
+
+
+def contenders(race_id: str) -> list[tuple[Runner, float]]:
+    """(runner, win chance) for every horse that can be bet on, likeliest
+    first. [] when there are no odds to price a bet from -- the feed is
+    down, or the draw hasn't been made so no horse has a number yet."""
+    _, runners = _race_field(race_id)
+    probabilities = win_probabilities(_win_odds(race_id)[0])
+    priced = [
+        (runner, probabilities[runner.number]) for runner in runners
+        if not runner.scratched and runner.number in probabilities
+    ]
+    return sorted(priced, key=lambda pair: -pair[1])
+
+
+def race_title(race: Race) -> str:
+    """e.g. "G2 · MAINICHI OKAN", falling back to the Japanese name."""
+    return display_name(race, _race_field(race.race_id)[0])
 
 
 def _favourite(race: Race) -> tuple[str | None, str | None, float | None]:
@@ -387,12 +408,13 @@ def _favourite(race: Race) -> tuple[str | None, str | None, float | None]:
     return english_name, names[number], contenders[number]
 
 
-def _results(race_id: str) -> list[dict]:
-    """Every horse that ran -- place, horse, jockey, final odds, time --
-    finishers in order, then non-finishers (DNF, disqualified) with a
-    place of None. [] if the race hasn't been run (en.netkeiba has no
-    results table until it has) or the page couldn't be read. Scratched
-    horses carry no odds and are left out; they never ran."""
+def race_results(race_id: str) -> list[dict]:
+    """Every horse that ran -- place, horse number, horse, jockey, final
+    odds, time -- finishers in order, then non-finishers (DNF,
+    disqualified) with a place of None. [] if the race hasn't been run
+    (en.netkeiba has no results table until it has) or the page couldn't
+    be read. Scratched horses carry no odds and are left out; they never
+    ran."""
     try:
         html = _fetch_text(EN_RESULT_URL, {'race_id': race_id}, _ODDS_TTL_SECONDS)
     except Exception as e:
@@ -418,10 +440,14 @@ def _results(race_id: str) -> list[dict]:
             continue
 
         place_text = place_el.get_text(strip=True)
+        # Two td.Num cells: the bracket (waku), then the horse number.
+        number_cells = row.select('td.Num')
+        number_text = number_cells[1].get_text(strip=True) if len(number_cells) > 1 else ''
         jockey_el = row.select_one('td.Jockey')
         time_el = row.select_one('td.Time')
         finishers.append({
             'place': int(place_text) if place_text.isdigit() else None,
+            'number': int(number_text) if number_text.isdigit() else None,
             'horse': horse_el.get_text(' ', strip=True),
             'jockey': jockey_el.get_text(' ', strip=True) if jockey_el else '',
             'odds': odds,
@@ -431,7 +457,7 @@ def _results(race_id: str) -> list[dict]:
 
 
 def _result_message(race: Race) -> str | None:
-    finishers = _results(race.race_id)
+    finishers = race_results(race.race_id)
     if not finishers or finishers[0]['place'] != 1:
         return None
 
@@ -457,11 +483,11 @@ def _result_message(race: Race) -> str | None:
     if winner_chance is not None:
         favourite_won = max(probabilities, key=probabilities.get) == 0
         if favourite_won:
-            lines.append(f"\nThe favourite delivered — {finishers[0]['horse']} went off with a {_percent(winner_chance)} chance.")
+            lines.append(f"\nThe favourite delivered — {finishers[0]['horse']} went off with a {percent(winner_chance)} chance.")
         elif winner_chance < 0.10:
-            lines.append(f"\n🚨 **UPSET!!** {finishers[0]['horse']} only had a {_percent(winner_chance)} chance of winning!")
+            lines.append(f"\n🚨 **UPSET!!** {finishers[0]['horse']} only had a {percent(winner_chance)} chance of winning!")
         else:
-            lines.append(f"\n{finishers[0]['horse']} went off with a {_percent(winner_chance)} chance of winning.")
+            lines.append(f"\n{finishers[0]['horse']} went off with a {percent(winner_chance)} chance of winning.")
     if finishers[0]['time']:
         lines.append(f"Winning time: {finishers[0]['time']}")
     return "\n".join(lines)
@@ -555,6 +581,25 @@ def _upcoming(now: datetime.datetime) -> list[Race]:
     return [race for race in _graded_races(now.date()) if race.post_time > now]
 
 
+def upcoming_races() -> list[Race]:
+    """Every graded race that hasn't gone off yet, soonest first."""
+    return _upcoming(datetime.datetime.now(JST))
+
+
+def find_race(query: str, races: list[Race]) -> Race | None:
+    """The race in races that a race id, or part of its English or
+    Japanese name, refers to."""
+    query = query.strip().lower()
+    race = next((r for r in races if r.race_id == query), None)
+    if race is None:
+        names = dict(zip(
+            (r.race_id for r in races),
+            _executor.map(lambda r: (_race_field(r.race_id)[0] or '').lower(), races),
+        ))
+        race = next((r for r in races if query in names[r.race_id] or query in r.name.lower()), None)
+    return race
+
+
 _NO_RACES = (
     "No JRA graded stakes on the card right now. 🏇\n"
     "The weekend's fields go up by Thursday (Japan time) — check back then!"
@@ -581,7 +626,7 @@ def jra_schedule() -> str:
             f"{_timestamp(race.post_time, 'F')} ({_timestamp(race.post_time, 'R')})"
         )
         if favourite:
-            lines.append(f"Favourite: **{favourite}** ({_percent(chance)} to win)")
+            lines.append(f"Favourite: **{favourite}** ({percent(chance)} to win)")
     lines.append("\n*Use /jraodds to see a race's full field and each horse's chance of winning.*")
     return "\n".join(lines)
 
@@ -617,18 +662,9 @@ def jra_race(query: str | None = None) -> str:
     if not races:
         return _NO_RACES
 
-    race = races[0]
-    if query:
-        query = query.strip().lower()
-        race = next((r for r in races if r.race_id == query), None)
-        if race is None:
-            names = dict(zip(
-                (r.race_id for r in races),
-                _executor.map(lambda r: (_race_field(r.race_id)[0] or '').lower(), races),
-            ))
-            race = next((r for r in races if query in names[r.race_id] or query in r.name.lower()), None)
-        if race is None:
-            return f"No upcoming JRA graded race matches **{query}**. Try /jra for the full list."
+    race = find_race(query, races) if query else races[0]
+    if race is None:
+        return f"No upcoming JRA graded race matches **{query.strip()}**. Try /jra for the full list."
 
     block = _race_block(race)
     return block or "Couldn't load that race's field right now. Try again later!"

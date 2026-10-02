@@ -23,6 +23,7 @@ import steam_sales
 import update_log
 import f1
 import jra
+import jra_bets
 import os
 from dotenv import load_dotenv
 
@@ -215,6 +216,7 @@ COMMAND_CATEGORIES = {
     'roulette': 'Economy',
     'blackjack': 'Economy',
     'bet': 'Economy',
+    'horsebet': 'Economy',
     'mybets': 'Economy',
     'leaderboard': 'Economy',
     'mcstatus': 'Other',
@@ -966,14 +968,62 @@ def run_discord_bot():
             if current.casefold() in name.casefold()
         ]
 
+    @client.hybrid_command(name="horsebet", description="Bet on a horse to win a JRA graded stakes race, before post time")
+    @discord.app_commands.describe(
+        race="Start typing a race to pick from the upcoming JRA card",
+        horse="Which horse wins — its name or number",
+        amount="How many coins to bet",
+    )
+    @commands.guild_only()
+    async def horsebet(ctx: commands.Context, race: str, horse: str, amount: commands.Range[int, 1]):
+        await ctx.defer()  # checking the race and its odds with netkeiba can take a moment
+
+        def place():
+            found = jra_bets.resolve_race(race)
+            runner, chance = jra_bets.resolve_horse(found, horse)
+            payout_pct = jra_bets.place_bet(ctx.guild.id, ctx.author.id, ctx.channel.id, found, runner, chance, amount)
+            return found, runner, payout_pct
+
+        try:
+            found, runner, payout_pct = await asyncio.to_thread(place)
+        except jra_bets.BetError as e:
+            await ctx.send(embed=_embed(str(e)))
+            return
+        await ctx.send(embed=_embed(
+            f"🎟️ **Bet placed** — {ctx.author.display_name} puts {economy.format_coins(amount)} on "
+            f"**#{runner.number} {runner.name}** to win\n"
+            f"{jra_bets.describe(found)}\n"
+            f"Pays {economy.format_coins(amount * payout_pct // 100)} if it wins "
+            f"({economy.format_multiplier(payout_pct)}). You'll get pinged here when it's run."
+        ))
+
+    @horsebet.autocomplete('race')
+    async def horsebet_race_autocomplete(interaction: discord.Interaction, current: str):
+        choices = await asyncio.to_thread(jra.race_choices, current)
+        return [discord.app_commands.Choice(name=name, value=value) for name, value in choices]
+
+    @horsebet.autocomplete('horse')
+    async def horsebet_horse_autocomplete(interaction: discord.Interaction, current: str):
+        # Offers the field of whichever race is already filled in.
+        suggestions = await asyncio.to_thread(jra_bets.horse_suggestions, interaction.namespace.race or "", current)
+        return [discord.app_commands.Choice(name=name, value=value) for name, value in suggestions]
+
     @client.hybrid_command(name="mybets", description="Your sports bets still waiting on a result")
     @commands.guild_only()
     async def mybets(ctx: commands.Context):
-        text = sportsbook.open_bets_text(ctx.guild.id, ctx.author.id)
-        if text is None:
-            await ctx.send(embed=_embed("You don't have any open bets. /bet to put coins on a game today or tomorrow."))
+        texts = [
+            text for text in (
+                sportsbook.open_bets_text(ctx.guild.id, ctx.author.id),
+                jra_bets.open_bets_text(ctx.guild.id, ctx.author.id),
+            ) if text
+        ]
+        if not texts:
+            await ctx.send(embed=_embed(
+                "You don't have any open bets. /bet to put coins on a game today or tomorrow, "
+                "or /horsebet on a JRA race."
+            ))
             return
-        await ctx.send(embed=_embed(f"🎟️ **Your open bets**\n{text}"))
+        await ctx.send(embed=_embed("🎟️ **Your open bets**\n" + "\n".join(texts)))
 
     async def economy_error(ctx: commands.Context, error: commands.CommandError):
         if isinstance(error, commands.NoPrivateMessage):
@@ -987,7 +1037,7 @@ def run_discord_bot():
         else:
             raise error
 
-    for command in (work, balance, slots, roulette, blackjack, bet, mybets, leaderboard):
+    for command in (work, balance, slots, roulette, blackjack, bet, horsebet, mybets, leaderboard):
         command.error(economy_error)
 
     @client.hybrid_command(name="help", description="Lists every command DJ Shinx offers")
@@ -1154,13 +1204,15 @@ def run_discord_bot():
         # destination -- a bet result is personal. The coins are already
         # paid by the time this posts, so a send that fails only loses
         # the message.
-        try:
-            settlements = await asyncio.to_thread(sportsbook.settle_finished_bets)
-        except Exception as e:
-            # Escaping here would stop the loop for good, leaving every
-            # later bet unsettled until a restart.
-            logger.exception(f"sportsbook: settling bets failed: {e}")
-            return
+        settlements = []
+        for settle in (sportsbook.settle_finished_bets, jra_bets.settle_finished_bets):
+            try:
+                settlements += await asyncio.to_thread(settle)
+            except Exception as e:
+                # Escaping here would stop the loop for good, leaving every
+                # later bet unsettled until a restart -- and each book is
+                # tried on its own, so one failing can't hold up the other.
+                logger.exception(f"{settle.__module__}: settling bets failed: {e}")
 
         for settlement in settlements:
             try:
