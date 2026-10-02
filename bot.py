@@ -1200,6 +1200,7 @@ def run_discord_bot():
         def place():
             picked = nfl_props.resolve_side(side)
             found = nfl_props.resolve_game(game)
+            # Rebuilt fresh, so the starter and injury checks are current.
             chosen = nfl_props.resolve_prop(found, prop)
             payout_pct = nfl_props.place_bet(ctx.guild.id, ctx.author.id, ctx.channel.id, found, chosen, picked, amount)
             return found, chosen, picked, payout_pct
@@ -1209,12 +1210,13 @@ def run_discord_bot():
         except nfl_props.BetError as e:
             await ctx.send(embed=_embed(str(e)))
             return
+        warning = f"\n{chosen.warning}" if chosen.warning else ""
         await ctx.send(embed=_embed(
             f"🎟️ **Bet placed** — {ctx.author.display_name} puts {economy.format_coins(amount)} on "
             f"**{chosen.subject} {picked} {chosen.line:g} {chosen.stat_label}**\n"
             f"{found.describe()}\n"
             f"Pays {economy.format_coins(amount * payout_pct // 100)} if it hits "
-            f"({economy.format_multiplier(payout_pct)}). You'll get pinged here when the game ends."
+            f"({economy.format_multiplier(payout_pct)}). You'll get pinged here when the game ends.{warning}"
         ))
 
     @propbet.autocomplete('game')

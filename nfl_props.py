@@ -7,11 +7,20 @@ player or stat you like. Each team offers exactly four props:
   WR1  the top wide receiver's receiving yards
   DEF  the defense's takeaways (interceptions + fumbles recovered)
 
-The player lines are DraftKings' own, from ESPN's odds feed, and they
-also decide who's on the menu: a team's QB is whoever has a passing
-yards line, and its RB1/WR1 is the RB/WR with the biggest yardage line.
-Books pull a player's props once he's ruled out, so an injured starter
-drops off the menu by himself and his backup takes the spot.
+Who fills each slot comes from the team's depth chart and injury report,
+so nobody can bet on a player who isn't going to play: walking down the
+depth chart, anyone ruled out (Out, Doubtful, on IR...) is skipped and
+the next man up is the projected starter. The QB and RB1 are the
+projected starters at those spots; the WR1 is whichever projected
+starting receiver the book expects the most yards from. A slot is only
+open when the book has a line on that exact player -- when ESPN and the
+book disagree about who's starting (a QB battle the team hasn't settled,
+say), the slot stays closed rather than guess. A starter listed
+questionable stays on the menu, flagged; if he sits, the bet is refunded.
+Every bet re-checks the injury report as it's placed, and an open bet on
+a player ruled out before kickoff is refunded on the spot.
+
+The player lines are DraftKings' own, from ESPN's odds feed.
 
 ESPN only carries the lines, not the prices on each side, so a player
 prop is treated as the coin flip a book's line is set to be and pays
@@ -43,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 CORE_BASE = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl"
 SUMMARY_URL = f"{sports.ESPN_SITE_BASE}/football/nfl/summary"
+DEPTH_CHART_URL = f"{sports.ESPN_SITE_BASE}/football/nfl/teams/{{team_id}}/depthcharts"
 # DraftKings, the book ESPN shows NFL odds from. A game names its own
 # provider on the scoreboard; this is only the fallback.
 DEFAULT_PROVIDER = '100'
@@ -56,8 +66,16 @@ PLAYER_STATS = {
     RUSHING_YARDS: ('rushing', 'rushingYards', "rushing yards"),
     RECEIVING_YARDS: ('receiving', 'receivingYards', "receiving yards"),
 }
-# The menu's player slots: (role, prop type, position that may fill it).
-ROLES = [('QB', PASSING_YARDS, 'QB'), ('RB1', RUSHING_YARDS, 'RB'), ('WR1', RECEIVING_YARDS, 'WR')]
+
+# Injury designations a starter can carry and still be on the menu,
+# flagged. Anything else -- Out, Doubtful, Injured Reserve, PUP, Suspended,
+# or a status this doesn't recognize -- counts as not playing: he's
+# skipped and the next man on the depth chart is treated as the starter.
+MAY_PLAY = {'Questionable', 'Probable', 'Day-To-Day'}
+# Ruled out, but not certainly: doubtful players do occasionally suit up,
+# so an open bet on one is left for the box score to settle rather than
+# refunded early (if he sits, it's refunded then anyway).
+NOT_CERTAIN = {'Doubtful'}
 
 # ESPN serves a game's ~1,200 props 25 to a page, sorted by type id. The
 # three needed come first (types 8-13, the first two pages), so paging
@@ -86,7 +104,13 @@ STALE_AFTER = datetime.timedelta(days=7)
 _MENU_TTL_SECONDS = 6 * 60
 _MENU_STALE_SECONDS = 30 * 60
 _SCOREBOARD_TTL_SECONDS = 60
-_ATHLETE_TTL_SECONDS = 12 * 3600  # name/position/team barely change
+# The book's lines refresh with each warm-loop pass, so a bet placed
+# between passes locks in the line its bettor was just shown.
+_LINES_TTL_SECONDS = 4 * 60
+# Injury news is what can't wait: the game summary carrying the injury
+# report is at most a minute old, and every bet re-checks it.
+_SUMMARY_TTL_SECONDS = 60
+_DEPTH_CHART_TTL_SECONDS = 15 * 60
 _TEAM_STATS_TTL_SECONDS = 6 * 3600
 
 _cache: dict[tuple, tuple[float, object]] = {}
@@ -221,26 +245,56 @@ def resolve_game(text: str) -> Game:
 
 @dataclass
 class Prop:
-    key: str                  # e.g. "wr1:IND" -- what /propbet's autocomplete hands back
-    role: str                 # 'QB', 'RB1', 'WR1' or 'DEF'
+    # What /propbet's autocomplete hands back. A player's names him, not
+    # just his slot ("wr1:IND:4429084"), so if the slot changes hands
+    # between picking and placing -- he's ruled out, say -- the bet is
+    # refused instead of quietly landing on his backup.
+    key: str
+    role: str                   # 'QB', 'RB1', 'WR1' or 'DEF'
     team: Team
-    subject: str              # "Josh Downs", or "Colts defense"
-    athlete_id: str | None    # None for a defense
-    stat: str                 # box score key, or 'takeaways'
+    subject: str                # "Josh Downs", or "Colts defense"
+    athlete_id: str | None      # None for a defense
+    stat: str                   # box score key, or 'takeaways'
     stat_label: str
-    line: float
-    payouts: dict[str, int]   # 'over' / 'under' -> payout_pct
+    line: float | None          # None when the slot is closed -- see note
+    payouts: dict[str, int]     # 'over' / 'under' -> payout_pct
+    status: str | None = None   # injury designation, e.g. 'Questionable'
+    note: str | None = None     # why the slot is closed
+
+    @property
+    def available(self) -> bool:
+        return self.line is not None
+
+    @property
+    def who(self) -> str:
+        """e.g. "Josh Downs (IND WR1)", "Colts defense" """
+        if self.role == 'DEF' or self.athlete_id is None:
+            return self.subject
+        flag = f", {self.status.lower()} ⚠️" if self.status else ""
+        return f"{self.subject} ({self.team.abbr} {self.role}{flag})"
 
     @property
     def label(self) -> str:
         """e.g. "Josh Downs (IND WR1) — receiving yards o/u 62.5" """
-        who = self.subject if self.role == 'DEF' else f"{self.subject} ({self.team.abbr} {self.role})"
-        return f"{who} — {self.stat_label} o/u {self.line:g}"
+        if not self.available:
+            return f"{self.who} — closed: {self.note}"
+        return f"{self.who} — {self.stat_label} o/u {self.line:g}"
+
+    @property
+    def warning(self) -> str:
+        """A line for the bet slip when the player might not play, or ''."""
+        if not self.status:
+            return ""
+        return f"⚠️ {self.subject} is listed {self.status.lower()} — if he doesn't play, the bet is refunded."
 
 
-def _player_lines(game: Game) -> dict[tuple[str, str], tuple[float, str]]:
-    """{(prop type, athlete id): (line, athlete $ref)} for the three
-    yardage props. Empty when the book hasn't posted props for the game."""
+def _player_lines(game: Game) -> dict[tuple[str, str], float]:
+    return _cached(('lines', game.event_id), _LINES_TTL_SECONDS, lambda: _fetch_player_lines(game))
+
+
+def _fetch_player_lines(game: Game) -> dict[tuple[str, str], float]:
+    """{(prop type, athlete id): line} for the three yardage props. Empty
+    when the book hasn't posted props for the game."""
     url = f"{CORE_BASE}/events/{game.event_id}/competitions/{game.event_id}/odds/{game.provider}/propBets"
     last_type = max(int(t) for t in PLAYER_STATS)
     lines = {}
@@ -258,24 +312,81 @@ def _player_lines(game: Game) -> dict[tuple[str, str], tuple[float, str]]:
             ref = (item.get('athlete') or {}).get('$ref', '')
             athlete = re.search(r'athletes/(\d+)', ref)
             if type_id in PLAYER_STATS and target is not None and athlete:
-                lines[(type_id, athlete.group(1))] = (float(target), ref)
+                lines[(type_id, athlete.group(1))] = float(target)
         past_needed = any(int(item.get('type', {}).get('id', 0)) > last_type for item in items)
         if not items or past_needed or page >= data.get('pageCount', 0):
             break
     return lines
 
 
-def _athlete(athlete_id: str, ref: str) -> tuple[str, str, str] | None:
-    """(name, position, team id), or None if it can't be read."""
+@dataclass
+class DepthChart:
+    """A team's offensive depth chart: each spot's players in order, as
+    (athlete id, name), plus the injury designations the chart notes."""
+    qb: list[tuple[str, str]]
+    rb: list[tuple[str, str]]
+    wr_spots: list[list[tuple[str, str]]]  # one per starting WR spot (X, Z, slot)
+    injuries: dict[str, str]
+
+
+def _depth_chart(team_id: str) -> DepthChart:
+    """Raises if ESPN can't be reached or has no offensive chart for the
+    team -- with no telling who starts, the menu build fails and the last
+    good menu stays up, rather than a guess going out."""
     def fetch():
-        try:
-            data = _get_json(ref)
-            team = re.search(r'teams/(\d+)', (data.get('team') or {}).get('$ref', ''))
-            return data['displayName'], data.get('position', {}).get('abbreviation', ''), team.group(1) if team else ''
-        except Exception as e:
-            logger.debug(f"nfl_props: couldn't read athlete {athlete_id}: {e}")
-            return None
-    return _cached(('athlete', athlete_id), _ATHLETE_TTL_SECONDS, fetch)
+        data = _get_json(DEPTH_CHART_URL.format(team_id=team_id))
+        offense = next(
+            (chart['positions'] for chart in data.get('depthchart', []) if 'qb' in (chart.get('positions') or {})),
+            None,
+        )
+        if offense is None:
+            raise ValueError(f"no offensive depth chart for team {team_id}")
+        spots: dict[str, list[list[tuple[str, str]]]] = {'QB': [], 'RB': [], 'WR': []}
+        injuries = {}
+        for spot in offense.values():
+            players = []
+            for athlete in spot.get('athletes', []):
+                athlete_id = str(athlete['id'])
+                players.append((athlete_id, athlete.get('displayName', '')))
+                status = next((i.get('status') for i in athlete.get('injuries') or [] if i.get('status')), None)
+                if status:
+                    injuries[athlete_id] = status
+            position = (spot.get('position') or {}).get('abbreviation')
+            if position in spots:
+                spots[position].append(players)
+        return DepthChart(
+            qb=spots['QB'][0] if spots['QB'] else [],
+            rb=spots['RB'][0] if spots['RB'] else [],
+            wr_spots=spots['WR'],
+            injuries=injuries,
+        )
+    return _cached(('depth', team_id), _DEPTH_CHART_TTL_SECONDS, fetch)
+
+
+def _summary(event_id: str) -> dict:
+    """ESPN's game summary: the injury report before kickoff, the box score
+    after. Shared by the menu and settling, and never over a minute old."""
+    return _cached(('summary', event_id), _SUMMARY_TTL_SECONDS, lambda: _get_json(SUMMARY_URL, {'event': event_id}))
+
+
+def _injury_report(summary: dict) -> dict[str, str]:
+    """{athlete id: designation} from a game summary's injury report."""
+    return {
+        str(entry['athlete']['id']): entry.get('status') or ''
+        for team in summary.get('injuries') or []
+        for entry in team.get('injuries', [])
+        if (entry.get('athlete') or {}).get('id')
+    }
+
+
+def _ruled_out(status: str | None) -> bool:
+    return bool(status) and status not in MAY_PLAY
+
+
+def _starter(depth: list[tuple[str, str]], injuries: dict[str, str]) -> tuple[str, str] | None:
+    """Who'll actually start at a spot: the first player on its depth
+    chart who isn't ruled out. None if everyone there is."""
+    return next((player for player in depth if not _ruled_out(injuries.get(player[0]))), None)
 
 
 def _turnover_rates(team_id: str, season: int) -> tuple[float, float, int]:
@@ -328,29 +439,58 @@ def _takeaway_market(defense: Team, offense: Team, season: int) -> tuple[float, 
     return line, {'over': _payout_pct(over), 'under': _payout_pct(1 - over)}
 
 
+def _player_prop(
+    role: str, team: Team, player: tuple[str, str] | None, prop_type: str,
+    lines: dict[tuple[str, str], float], injuries: dict[str, str],
+) -> Prop:
+    """One player slot: open when the book has a line on its projected
+    starter, closed (saying why) when it doesn't. No line usually means
+    the book doubts he'll play, or that it's waiting on the team to name
+    a starter -- either way, no guessing."""
+    _, stat, label = PLAYER_STATS[prop_type]
+    if player is None:
+        return Prop(
+            key=f"{role.lower()}:{team.abbr}:", role=role, team=team, subject=f"{team.abbr} {role}",
+            athlete_id=None, stat=stat, stat_label=label, line=None, payouts={},
+            note="everyone on the depth chart is ruled out",
+        )
+    athlete_id, name = player
+    line = lines.get((prop_type, athlete_id))
+    even = _payout_pct(0.5)
+    return Prop(
+        key=f"{role.lower()}:{team.abbr}:{athlete_id}", role=role, team=team, subject=name,
+        athlete_id=athlete_id, stat=stat, stat_label=label, line=line,
+        payouts={'over': even, 'under': even} if line is not None else {},
+        status=injuries.get(athlete_id) or None,
+        note=None if line is not None else "no line posted for him yet",
+    )
+
+
 def _build_menu(game: Game) -> list[Prop]:
     lines = _player_lines(game)
-    athletes = {athlete_id: ref for (_, athlete_id), (_, ref) in lines.items()}
-    info = dict(zip(athletes, sports._executor.map(lambda a: _athlete(a, athletes[a]), athletes)))
+    report = _injury_report(_summary(game.event_id))
+    team_ids = (game.away.id, game.home.id)
+    charts = dict(zip(team_ids, sports._executor.map(_depth_chart, team_ids)))
 
-    even = _payout_pct(0.5)
     menu = []
     for team, opponent in ((game.away, game.home), (game.home, game.away)):
-        for role, prop_type, position in ROLES:
-            candidates = [
-                (line, athlete_id) for (type_id, athlete_id), (line, _) in lines.items()
-                if type_id == prop_type and info.get(athlete_id)
-                and info[athlete_id][1] == position and info[athlete_id][2] == team.id
-            ]
-            if not candidates:
-                continue
-            line, athlete_id = max(candidates)
-            _, stat, label = PLAYER_STATS[prop_type]
-            menu.append(Prop(
-                key=f"{role.lower()}:{team.abbr}", role=role, team=team, subject=info[athlete_id][0],
-                athlete_id=athlete_id, stat=stat, stat_label=label, line=line,
-                payouts={'over': even, 'under': even},
-            ))
+        chart = charts[team.id]
+        # The game's injury report is the fresher source; the depth
+        # chart's own notes cover anyone it leaves off.
+        injuries = {**chart.injuries, **report}
+        menu.append(_player_prop('QB', team, _starter(chart.qb, injuries), PASSING_YARDS, lines, injuries))
+        menu.append(_player_prop('RB1', team, _starter(chart.rb, injuries), RUSHING_YARDS, lines, injuries))
+
+        # WR1: of the receivers projected to start, the one the book
+        # expects the most yards from.
+        receivers = list(dict.fromkeys(filter(None, (_starter(spot, injuries) for spot in chart.wr_spots))))
+        priced = [r for r in receivers if (RECEIVING_YARDS, r[0]) in lines]
+        if priced:
+            wr1 = max(priced, key=lambda r: lines[(RECEIVING_YARDS, r[0])])
+        else:
+            wr1 = receivers[0] if receivers else None
+        menu.append(_player_prop('WR1', team, wr1, RECEIVING_YARDS, lines, injuries))
+
         line, payouts = _takeaway_market(team, opponent, game.season)
         menu.append(Prop(
             key=f"def:{team.abbr}", role='DEF', team=team, subject=f"{team.name} defense",
@@ -360,12 +500,13 @@ def _build_menu(game: Game) -> list[Prop]:
 
 
 def menu(game: Game, max_age: float = _MENU_TTL_SECONDS) -> list[Prop]:
-    """The props on offer for a game. Without the book's player lines
-    there's no menu at all -- not even the defenses -- since a game with
-    no props posted is usually days out and its matchup still unsettled."""
+    """Every slot for a game, open or closed. With no player props open
+    there's no menu at all -- not even the defenses -- since a game the
+    book hasn't posted props for is usually days out and its matchup
+    still unsettled."""
     def fetch():
         built = _build_menu(game)
-        return built if any(p.role != 'DEF' for p in built) else []
+        return built if any(p.available and p.role != 'DEF' for p in built) else []
     return _cached(('menu', game.event_id), max_age, fetch)
 
 
@@ -400,23 +541,40 @@ def prop_suggestions(game_text: str, current: str) -> list[tuple[str, str]]:
     except BetError:
         return []
     needle = current.strip().casefold()
-    return [(p.label[:100], p.key) for p in props if needle in p.label.casefold() or needle == p.key.casefold()]
+    return [
+        (p.label[:100], p.key) for p in props
+        if p.available and (needle in p.label.casefold() or needle == p.key.casefold())
+    ]
 
 
-def resolve_prop(game: Game, text: str, max_age: float = _MENU_TTL_SECONDS) -> Prop:
+def resolve_prop(game: Game, text: str, max_age: float = 0) -> Prop:
+    """The open prop a bettor picked -- an autocomplete value, a slot like
+    "wr1:IND", or a name typed by hand. The menu is rebuilt fresh by
+    default, so the injury report is re-checked the moment a bet goes on:
+    news right before kickoff is exactly when it matters. Raises BetError
+    if the pick isn't open."""
     props = _menu_or_error(game, max_age)
     needle = text.strip().casefold()
-    matches = [p for p in props if p.key.casefold() == needle] or [
+    matches = [p for p in props if p.key.casefold() == needle or p.key.casefold().startswith(needle + ':')] or [
         p for p in props if needle and needle in p.label.casefold()
     ]
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
-        listed = ", ".join(p.label for p in matches[:4])
+    open_matches = [p for p in matches if p.available]
+    if len(open_matches) == 1:
+        return open_matches[0]
+    if len(open_matches) > 1:
+        listed = ", ".join(p.label for p in open_matches[:4])
         raise BetError(f"**{text}** matches more than one prop ({listed}). Be more specific.")
+    if matches:
+        raise BetError(f"**{matches[0].who}** isn't open for bets — {matches[0].note}.")
+    if needle.count(':') == 2:
+        # A pick from the dropdown whose player has since left the slot.
+        raise BetError(
+            "That player isn't on the menu anymore — he's been ruled out or isn't the expected starter "
+            "now. /props shows the latest."
+        )
     raise BetError(
-        f"**{text}** isn't on the menu for **{game.matchup}**. Props are each team's QB, RB1, WR1 and "
-        f"defense — start typing in /propbet to pick one."
+        f"**{text}** isn't on the menu for **{game.matchup}**. Props are each team's starting QB, RB1, WR1 "
+        f"and defense — start typing in /propbet to pick one."
     )
 
 
@@ -463,15 +621,21 @@ def menu_text(game_text: str | None) -> str:
     for team in (game.away, game.home):
         lines.append(f"\n**{team.name}**")
         for prop in (p for p in props if p.team.id == team.id):
+            flag = f" ⚠️ *{prop.status.lower()}*" if prop.status else ""
             if prop.role == 'DEF':
                 over = economy.format_multiplier(prop.payouts['over'])
                 under = economy.format_multiplier(prop.payouts['under'])
                 lines.append(f"`DEF` Defense — takeaways o/u **{prop.line:g}** (over {over} · under {under})")
+            elif prop.athlete_id is None:
+                lines.append(f"`{prop.role}` *closed: {prop.note}*")
+            elif not prop.available:
+                lines.append(f"`{prop.role}` {prop.subject}{flag} — *closed: {prop.note}*")
             else:
-                lines.append(f"`{prop.role}` {prop.subject} — {prop.stat_label} o/u **{prop.line:g}**")
+                lines.append(f"`{prop.role}` {prop.subject}{flag} — {prop.stat_label} o/u **{prop.line:g}**")
     lines.append(
-        f"\n*Player props pay {even} either way. Lines are DraftKings', locked in when you bet. "
-        f"/propbet to put coins on one.*"
+        f"\n*Starters come from each team's depth chart and injury report; anyone ruled out is skipped "
+        f"for the next man up. ⚠️ = questionable: if he sits, the bet is refunded. Player props pay "
+        f"{even} either way, on DraftKings' lines, locked in when you bet. /propbet to put coins on one.*"
     )
     return "\n".join(lines)
 
@@ -572,6 +736,7 @@ class BoxScore:
     stats: dict[str, dict[str, float]]  # athlete id -> {box score key: value}
     played: set[str]                     # every athlete id anywhere in the box score
     turnovers: dict[str, int]            # team id -> turnovers committed
+    injuries: dict[str, str]             # athlete id -> injury designation
 
 
 def _number(text) -> float | None:
@@ -582,7 +747,7 @@ def _number(text) -> float | None:
 
 
 def _box_score(event_id: str) -> BoxScore:
-    data = _get_json(SUMMARY_URL, {'event': event_id})
+    data = _summary(event_id)
     status = data['header']['competitions'][0]['status']['type']
     boxscore = data.get('boxscore') or {}
 
@@ -606,7 +771,9 @@ def _box_score(event_id: str) -> BoxScore:
                 value = _number(stat.get('displayValue'))
                 if value is not None:
                     turnovers[str(team['team']['id'])] = int(value)
-    return BoxScore(status['state'], bool(status.get('completed')), stats, played, turnovers)
+    return BoxScore(
+        status['state'], bool(status.get('completed')), stats, played, turnovers, _injury_report(data),
+    )
 
 
 def _actual(bet: sqlite3.Row, box: BoxScore) -> float | None:
@@ -642,6 +809,22 @@ def _grade(bet: sqlite3.Row, actual: float | None) -> tuple[str, int, str]:
     if hit:
         return 'won', bet['amount'] * bet['payout_pct'] // 100, f"{headline}\nYour {stake} on {name} won! 🎉"
     return 'lost', 0, f"{headline}\nYour {stake} on {name} lost."
+
+
+def _certainly_out(status: str | None) -> bool:
+    return _ruled_out(status) and status not in NOT_CERTAIN
+
+
+_OUT_REASONS = {'Out': "has been ruled out", 'Injured Reserve': "has gone on injured reserve"}
+
+
+def _ruled_out_text(bet: sqlite3.Row, status: str) -> str:
+    reason = _OUT_REASONS.get(status, f"is listed {status.lower()}")
+    return (
+        f"🏈 **{bet['matchup']}** — {bet['subject']} {reason}, so your "
+        f"{economy.format_coins(bet['amount'])} on "
+        f"**{_bet_name(bet['subject'], bet['side'], bet['line'], bet['stat_label'])}** comes back."
+    )
 
 
 def _settle(bet: sqlite3.Row, status: str, returned: int, actual: float | None) -> int | None:
@@ -689,6 +872,15 @@ def settle_finished_bets() -> list[Settlement]:
                  f"🏈 **{bet['matchup']}** was called off, so your {economy.format_coins(bet['amount'])} on "
                  f"**{_bet_name(bet['subject'], bet['side'], bet['line'], bet['stat_label'])}** comes back.")
                 for bet in bets
+            ]
+        elif box and box.state == 'pre':
+            # Not kicked off yet: a bet on a player ruled out since it went
+            # on comes back now, rather than sitting until the final whistle
+            # on a guy who won't play. Everything else waits for the game.
+            graded = [
+                (bet, None, 'refunded', bet['amount'], _ruled_out_text(bet, box.injuries[bet['athlete_id']]))
+                for bet in bets
+                if bet['athlete_id'] and _certainly_out(box.injuries.get(bet['athlete_id']))
             ]
         else:
             continue
