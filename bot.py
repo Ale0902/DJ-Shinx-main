@@ -383,7 +383,7 @@ async def _take_bet(ctx: commands.Context, bet: int) -> bool:
         embed=_embed(
             f"You only have {economy.format_coins(coins)} — not enough to bet "
             f"{economy.format_coins(bet)}. /work pays **{economy.WORK_MIN}–{economy.WORK_MAX}** "
-            f"{economy.COIN} every {economy.WORK_COOLDOWN_HOURS} hours, and /mine pays "
+            f"{economy.COIN} every {economy.WORK_EVERY}, and /mine pays "
             f"**{economy.MINE_MIN}–{economy.MINE_MAX}** {economy.COIN} every "
             f"{economy.MINE_COOLDOWN_MINUTES} minutes."
         ),
@@ -799,7 +799,7 @@ def run_discord_bot():
 
     @client.hybrid_command(
         name="work",
-        description=f"Earn {economy.WORK_MIN}–{economy.WORK_MAX} coins — every {economy.WORK_COOLDOWN_HOURS} hours",
+        description=f"Earn {economy.WORK_MIN}–{economy.WORK_MAX} coins — every {economy.WORK_EVERY}",
     )
     @commands.guild_only()
     async def work(ctx: commands.Context):

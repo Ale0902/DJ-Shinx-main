@@ -1,5 +1,5 @@
 """A play-money economy for each server: /work pays a random amount every
-two hours and /mine a smaller one every 15 minutes, and slots, roulette and
+hour and /mine a smaller one every 15 minutes, and slots, roulette and
 blackjack let people bet it to try to grow it. Coins are worth nothing outside the bot and can't be bought.
 
 Every server has its own separate economy -- balances are keyed by
@@ -29,7 +29,9 @@ COIN = "🪙"
 WORK_MIN = 200
 WORK_MAX = 700
 # How long after a /work shift until the next one pays.
-WORK_COOLDOWN_HOURS = 2
+WORK_COOLDOWN_HOURS = 1
+# For the bot's messages: "every hour" / "every 2 hours".
+WORK_EVERY = "hour" if WORK_COOLDOWN_HOURS == 1 else f"{WORK_COOLDOWN_HOURS} hours"
 
 # Flavor text for /work -- unrelated to how much it pays.
 WORK_JOBS = [
