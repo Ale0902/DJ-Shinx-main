@@ -212,6 +212,7 @@ COMMAND_CATEGORIES = {
     '8ball': 'Fun',
     'work': 'Economy',
     'balance': 'Economy',
+    'donate': 'Economy',
     'slots': 'Economy',
     'roulette': 'Economy',
     'blackjack': 'Economy',
@@ -819,6 +820,36 @@ def run_discord_bot():
         whose = "You have" if member.id == ctx.author.id else f"{member.mention} has"
         await ctx.send(embed=_embed(f"{whose} {economy.format_coins(coins)}."))
 
+    @client.hybrid_command(name="donate", aliases=["give"], description="Give some of your coins to someone else in the server")
+    @discord.app_commands.describe(member="Who to give coins to", amount="How many coins to give")
+    @commands.guild_only()
+    async def donate(ctx: commands.Context, member: discord.Member, amount: commands.Range[int, 1]):
+        if member.id == ctx.author.id:
+            await ctx.send(embed=_embed("You can't donate to yourself."), ephemeral=True)
+            return
+        if member.bot:
+            # Nothing could ever spend them -- they'd just vanish.
+            await ctx.send(embed=_embed("Bots can't hold coins."), ephemeral=True)
+            return
+        result = economy.give(ctx.guild.id, ctx.author.id, member.id, amount)
+        if result is None:
+            coins = economy.get_balance(ctx.guild.id, ctx.author.id)
+            await ctx.send(embed=_embed(
+                f"You only have {economy.format_coins(coins)} — not enough to give {economy.format_coins(amount)}."
+            ), ephemeral=True)
+            return
+        given, received = result
+        # The mention outside the embed pings the receiver so they know.
+        await ctx.send(
+            content=member.mention,
+            embed=_embed(
+                f"💸 {ctx.author.mention} gave {member.mention} {economy.format_coins(amount)}!\n"
+                f"{ctx.author.display_name}: {economy.format_coins(given)} · "
+                f"{member.display_name}: {economy.format_coins(received)}"
+            ),
+            allowed_mentions=discord.AllowedMentions(users=[member]),
+        )
+
     @client.hybrid_command(name="slots", description="Spin the slot machine")
     @discord.app_commands.describe(bet="How many coins to bet — leave empty to see the payouts")
     @commands.guild_only()
@@ -1029,7 +1060,8 @@ def run_discord_bot():
         if isinstance(error, commands.NoPrivateMessage):
             await ctx.send(embed=_embed("Coins belong to a server — use this in one, not a DM."), ephemeral=True)
         elif isinstance(error, commands.RangeError):
-            await ctx.send(embed=_embed("Bets have to be at least 1 coin."), ephemeral=True)
+            what = "Donations" if ctx.command.name == 'donate' else "Bets"
+            await ctx.send(embed=_embed(f"{what} have to be at least 1 coin."), ephemeral=True)
         elif isinstance(error, (commands.BadArgument, commands.MissingRequiredArgument)):
             await ctx.send(
                 embed=_embed(f"Usage: `!{ctx.command.name} {ctx.command.signature}`"), ephemeral=True
@@ -1037,7 +1069,7 @@ def run_discord_bot():
         else:
             raise error
 
-    for command in (work, balance, slots, roulette, blackjack, bet, horsebet, mybets, leaderboard):
+    for command in (work, balance, donate, slots, roulette, blackjack, bet, horsebet, mybets, leaderboard):
         command.error(economy_error)
 
     @client.hybrid_command(name="help", description="Lists every command DJ Shinx offers")

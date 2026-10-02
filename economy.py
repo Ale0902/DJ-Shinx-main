@@ -160,6 +160,24 @@ def pay(guild_id, user_id, amount: int, conn: sqlite3.Connection | None = None) 
         ).fetchone()[0]
 
 
+def give(guild_id, from_user_id, to_user_id, amount: int) -> tuple[int, int] | None:
+    """Moves coins from one user's wallet to another's in this server.
+    Returns (giver's new balance, receiver's new balance), or None,
+    moving nothing, if the giver can't cover it. Both sides are one
+    transaction, so coins can't leave one wallet without reaching the
+    other, and the same balance-checked UPDATE take_bet uses means two
+    gifts at once can't spend the same coins twice."""
+    with connect() as conn:
+        if not take_bet(guild_id, from_user_id, amount, conn=conn):
+            return None
+        received = pay(guild_id, to_user_id, amount, conn=conn)
+        given = conn.execute(
+            "SELECT balance FROM wallets WHERE guild_id = ? AND user_id = ?",
+            (str(guild_id), str(from_user_id)),
+        ).fetchone()[0]
+    return given, received
+
+
 def leaderboard(guild_id, limit: int = 10) -> list[tuple[int, int]]:
     """Returns [(user_id, balance)] for this server's richest users,
     richest first. Anyone sitting at zero is left out."""
