@@ -313,6 +313,22 @@ def _grid_recap(event_id: str, competitions: list[dict], race_abbrev: str) -> st
     return f"**{label} Recap:**\n{table}"
 
 
+def _race_day_message(event: dict, competitions: list[dict], race_abbrev: str) -> str:
+    recap = _grid_recap(event['id'], competitions, race_abbrev)
+    recap_text = f"\n\n{recap}" if recap else ""
+    return f"# IT'S {RACE_DAY_BANNERS[race_abbrev]} DAY!! 🏎️🏁\n**{event['name']}**{recap_text}"
+
+
+def _results_message(event: dict, competition: dict) -> str | None:
+    """A session's results announcement, or None if they couldn't be
+    fetched (a transient API hiccup -- worth retrying later)."""
+    table = _session_results_table(event['id'], competition)
+    if not table:
+        return None
+    label = SESSION_LABELS.get(competition['type']['abbreviation'], competition['type']['abbreviation'])
+    return f"## {label} Results — {event['name']}\n{table}"
+
+
 def check_f1_updates() -> list[str]:
     """Checks the current F1 race weekend for new milestones -- race week
     start, each session's results once it finishes, and qualifying/race
@@ -365,21 +381,56 @@ def check_f1_updates() -> list[str]:
             done.append(day_marker)
 
         if abbrev in RACE_DAY_BANNERS and day_marker not in done and today == comp_date.date():
-            banner = RACE_DAY_BANNERS[abbrev]
-            recap = _grid_recap(event_id, competitions, abbrev)
-            recap_text = f"\n\n{recap}" if recap else ""
-            messages.append(f"# IT'S {banner} DAY!! 🏎️🏁\n**{event['name']}**{recap_text}")
+            messages.append(_race_day_message(event, competitions, abbrev))
             done.append(day_marker)
 
         results_marker = f"results:{comp_id}"
         if completed and results_marker not in done:
-            table = _session_results_table(event_id, competition)
-            if table:
-                messages.append(f"## {label} Results — {event['name']}\n{table}")
+            results = _results_message(event, competition)
+            if results:
+                messages.append(results)
                 done.append(results_marker)
 
     _save_state(state)
     return messages
+
+
+def race_day_catch_up() -> list[str]:
+    """What a server that's only just started getting F1 updates -- the
+    bot newly added there, or the feature newly set up -- has missed today,
+    if today is a race day: the race-day banner with the grid, or once the
+    race has been run and its results posted, those results instead (the
+    banner is stale by then).
+
+    Only what has already gone out to everyone else, which is why it reads
+    check_f1_updates' own record of what's been announced: anything still
+    to come reaches every server through the regular loop anyway, so
+    catching it up here too would post it twice. Empty on any other day."""
+    try:
+        event = _current_event()
+        if not event:
+            return []
+        state = _load_state()
+        done = state.get('done', []) if state.get('event_id') == event['id'] else []
+        today = datetime.datetime.now(EASTERN).date()
+        competitions = sorted(event.get('competitions', []), key=lambda c: c['date'])
+
+        messages = []
+        for competition in competitions:
+            abbrev = competition['type']['abbreviation']
+            race_date = datetime.datetime.fromisoformat(competition['date'].replace('Z', '+00:00')).astimezone(EASTERN).date()
+            if abbrev not in RACE_DAY_BANNERS or race_date != today:
+                continue
+            if f"results:{competition['id']}" in done:
+                results = _results_message(event, competition)
+                if results:
+                    messages.append(results)
+            elif f"day:{competition['id']}" in done:
+                messages.append(_race_day_message(event, competitions, abbrev))
+        return messages
+    except Exception as e:
+        logger.warning(f"race_day_catch_up failed: {e}")
+        return []
 
 
 def f1_status() -> str:

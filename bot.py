@@ -406,6 +406,34 @@ def _announcement_status(guild_id: int, client: discord.Client) -> str:
     return "\n".join(lines)
 
 
+# (guild id, Eastern date) pairs already caught up on today's F1 race day,
+# so a bot re-added twice in a day, or /setchannel run again, can't post
+# it twice. In memory only: a restart forgetting it costs one repeat.
+_f1_caught_up: set[tuple[int, datetime.date]] = set()
+
+
+async def _f1_race_day_catch_up(client: discord.Client, guild_id: int) -> None:
+    """Posts today's F1 race-day announcement in a server that's only just
+    started getting F1 updates -- the bot newly added, or the feature newly
+    set up -- since it went out to every other server before this one was
+    listening. Nothing on any other day. Never raises."""
+    key = (guild_id, datetime.datetime.now(EASTERN).date())
+    channel_id = channel_config.get_channel(guild_id, 'f1_updates')
+    if channel_id is None or key in _f1_caught_up:
+        return
+    messages = await asyncio.to_thread(f1.race_day_catch_up)
+    if not messages:
+        return
+    _f1_caught_up.add(key)  # before the first await, so two triggers at once can't both post
+    try:
+        channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
+        for message in messages:
+            await channel.send(embed=_embed(message))
+    except Exception as e:
+        _f1_caught_up.discard(key)
+        logger.warning(f"f1: couldn't post today's race day in guild {guild_id}: {e}")
+
+
 class _SetChannelFeatureSelect(discord.ui.Select):
     """Step 1 of /setchannel: pick which features to set up -- one, or
     several to send them all to the same channel at once."""
@@ -481,6 +509,10 @@ class _SetChannelChannelSelect(discord.ui.ChannelSelect):
             )
             return
 
+        f1_moved_here = (
+            'f1_updates' in self.parent_view.features
+            and channel_config.get_channel(guild.id, 'f1_updates') != channel.id
+        )
         for key in self.parent_view.features:
             channel_config.set_channel(guild.id, key, channel.id)
 
@@ -501,6 +533,10 @@ class _SetChannelChannelSelect(discord.ui.ChannelSelect):
             view=self.parent_view,
         )
         self.parent_view.stop()
+        if f1_moved_here:
+            # After the reply, since it fetches results: if today's a race
+            # day, this channel shouldn't have to wait for next weekend.
+            await _f1_race_day_catch_up(interaction.client, guild.id)
 
 
 class SetChannelView(discord.ui.View):
@@ -1701,6 +1737,13 @@ def run_discord_bot():
         logger.info(f'{client.user} is now running!')
         await client.tree.sync()
         await _post_update_log()
+
+    @client.event
+    async def on_guild_join(guild: discord.Guild):
+        # A server can set up F1 updates before the bot is really in it --
+        # its slash commands work without that -- and on race day the day's
+        # announcement has gone out to everyone else by the time it joins.
+        await _f1_race_day_catch_up(client, guild.id)
 
     client.run(TOKEN)
 
