@@ -22,6 +22,7 @@ import sportsbook
 import steam_sales
 import update_log
 import f1
+import jra
 import os
 from dotenv import load_dotenv
 
@@ -198,6 +199,8 @@ COMMAND_CATEGORIES = {
     'ucl': 'Sports',
     'f1': 'Sports',
     'f1standings': 'Sports',
+    'jra': 'Sports',
+    'jraodds': 'Sports',
     'recsong': 'Music',
     'top5songs': 'Music',
     'hello': 'Fun',
@@ -647,6 +650,24 @@ def run_discord_bot():
         for message in messages:
             await ctx.send(embed=_embed(message))
 
+    @client.hybrid_command(name="jra", description="Upcoming Japanese (JRA) graded stakes horse races")
+    async def jracmd(ctx: commands.Context):
+        await ctx.defer()
+        result = await asyncio.to_thread(jra.jra_schedule)
+        await ctx.send(embed=_embed(result))
+
+    @client.hybrid_command(name="jraodds", description="A JRA race's field and each horse's chance of winning")
+    @discord.app_commands.describe(race="Which race — leave empty for the next one up")
+    async def jraodds(ctx: commands.Context, *, race: str | None = None):
+        await ctx.defer()
+        result = await asyncio.to_thread(jra.jra_race, race)
+        await ctx.send(embed=_embed(result))
+
+    @jraodds.autocomplete('race')
+    async def jraodds_race_autocomplete(interaction: discord.Interaction, current: str):
+        choices = await asyncio.to_thread(jra.race_choices, current)
+        return [discord.app_commands.Choice(name=name, value=value) for name, value in choices]
+
     @client.hybrid_command(name="mcstatus", description="Check the Minecraft server status")
     async def mcstatus(ctx: commands.Context):
         await ctx.defer()
@@ -1054,6 +1075,20 @@ def run_discord_bot():
 
         await _broadcast('f1_updates', send)
 
+    @tasks.loop(minutes=5.0)
+    async def jra_updates():
+        # Every 5 minutes rather than F1's 15, so the "minutes to post"
+        # alert lands close to half an hour before the off.
+        messages = await asyncio.to_thread(jra.check_jra_updates)
+        if not messages:
+            return
+
+        async def send(channel):
+            for message in messages:
+                await channel.send(embed=_embed(message))
+
+        await _broadcast('jra_updates', send)
+
     @tasks.loop(minutes=30.0)
     async def game_announcements():
         messages = await asyncio.to_thread(game_news.check_game_announcements)
@@ -1173,6 +1208,7 @@ def run_discord_bot():
         sotd.start()
         new_chapter_announcements.start()
         f1_updates.start()
+        jra_updates.start()
         game_announcements.start()
         game_reminders.start()
         game_recaps.start()
