@@ -1,6 +1,6 @@
 """A play-money economy for each server: /work pays a random amount every
-30 minutes and /mine a smaller one up to 10 times a half hour, and slots, roulette and
-blackjack let people bet it to try to grow it. Coins are worth nothing outside the bot and can't be bought.
+30 minutes and /mine a smaller one up to 10 times a half hour, and slots, roulette,
+blackjack and video poker let people bet it to try to grow it. Coins are worth nothing outside the bot and can't be bought.
 
 Every server has its own separate economy -- balances are keyed by
 (guild, user), so a leaderboard only ranks people in that server and
@@ -9,7 +9,8 @@ SQLite file, same pattern as memory_db.py and channel_config.py.
 
 The games lean slightly in the players' favor, so a server's economy can
 slowly grow rather than drain: slots pays back about 102% on average,
-roulette about 102%, blackjack about 101% with sensible play. Still a
+roulette about 102%, blackjack about 101% with sensible play, video poker
+about 101.8% with perfect play (a bit less holding by feel). Still a
 gamble -- any one bet is more likely to lose than to win big -- but
 someone who keeps playing tends to come out a little ahead.
 """
@@ -19,6 +20,7 @@ import math
 import os
 import random
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -532,3 +534,106 @@ class BlackjackGame:
             'bust': "💥 **Bust!** You went over 21.",
             'dealer_blackjack': "❌ **Dealer has blackjack.**",
         }[self.outcome]
+
+
+#=========================--VIDEO POKER--====================================#
+
+# Jacks or Better: winning hand -> total return as a multiple of the bet,
+# best hand first. The standard "9/6" machine (full house 9, flush 6) pays
+# back about 99.5% with perfect play; a full house at 10 and a flush at 7
+# lift that to about 101.8%, in line with the other games.
+POKER_PAYS = {
+    "Royal Flush": 800,
+    "Straight Flush": 50,
+    "Four of a Kind": 25,
+    "Full House": 10,
+    "Flush": 7,
+    "Straight": 4,
+    "Three of a Kind": 3,
+    "Two Pair": 2,
+    "Jacks or Better": 1,
+}
+
+
+def _poker_value(card: str) -> int:
+    """2-10 at face value, J 11, Q 12, K 13, A 14."""
+    rank = card[:-1]
+    return 14 if rank == "A" else RANKS.index(rank) + 1
+
+
+def poker_hand(cards: list[str]) -> str | None:
+    """The best paying hand these five cards make, e.g. "Two Pair", or
+    None if they don't make one. A pair only pays from jacks up."""
+    values = sorted(_poker_value(card) for card in cards)
+    counts = Counter(values)
+    shape = sorted(counts.values(), reverse=True)
+    flush = len({card[-1] for card in cards}) == 1
+    # An ace plays low in A-2-3-4-5 as well as high in 10-J-Q-K-A.
+    straight = len(counts) == 5 and (values[4] - values[0] == 4 or values == [2, 3, 4, 5, 14])
+
+    if straight and flush:
+        return "Royal Flush" if values[0] == 10 else "Straight Flush"
+    if shape[0] == 4:
+        return "Four of a Kind"
+    if shape == [3, 2]:
+        return "Full House"
+    if flush:
+        return "Flush"
+    if straight:
+        return "Straight"
+    if shape[0] == 3:
+        return "Three of a Kind"
+    if shape == [2, 2, 1]:
+        return "Two Pair"
+    if shape[0] == 2 and max(value for value, count in counts.items() if count == 2) >= 11:
+        return "Jacks or Better"
+    return None
+
+
+def poker_paytable() -> str:
+    lines = ["**Payouts** (× your bet)"]
+    for hand, multiplier in POKER_PAYS.items():
+        lines.append(f"{hand} — {multiplier}×")
+    return "\n".join(lines)
+
+
+class PokerGame:
+    """One hand of Jacks or Better video poker: five cards dealt from a
+    freshly shuffled deck, the player picks which to hold, and a single
+    draw replaces the rest.
+
+    Holds no money itself: the caller takes the bet before dealing and
+    pays out payout() once finished is True."""
+
+    def __init__(self, bet: int):
+        self.bet = bet
+        self.deck = [rank + suit for suit in SUITS for rank in RANKS]
+        random.shuffle(self.deck)
+        self.cards = [self.deck.pop() for _ in range(5)]
+        self.held = [False] * 5
+        self.finished = False
+
+    @property
+    def hand(self) -> str | None:
+        return poker_hand(self.cards)
+
+    def toggle_hold(self, index: int) -> None:
+        self.held[index] = not self.held[index]
+
+    def draw(self) -> None:
+        for index, held in enumerate(self.held):
+            if not held:
+                self.cards[index] = self.deck.pop()
+        self.finished = True
+
+    def payout(self) -> int:
+        """Total coins returned to the player, including their stake."""
+        return self.bet * POKER_PAYS[self.hand] if self.hand else 0
+
+    def result_line(self) -> str:
+        if self.hand is None:
+            return "❌ **No winning hand.**"
+        multiplier = POKER_PAYS[self.hand]
+        if multiplier == 1:
+            return f"🤝 **{self.hand}** — your bet comes back."
+        return f"✅ **{self.hand}!** Pays {multiplier}×."

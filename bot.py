@@ -217,6 +217,7 @@ COMMAND_CATEGORIES = {
     'slots': 'Economy',
     'roulette': 'Economy',
     'blackjack': 'Economy',
+    'poker': 'Economy',
     'bet': 'Economy',
     'horsebet': 'Economy',
     'mybets': 'Economy',
@@ -477,6 +478,101 @@ class BlackjackView(discord.ui.View):
         if not self.game.finished:
             self.timed_out = True
             self.game.stand()
+        self.settle()
+        self._refresh_buttons()
+        if self.message:
+            try:
+                await self.message.edit(embed=self.embed(), view=self)
+            except discord.HTTPException:
+                pass
+
+
+class PokerView(discord.ui.View):
+    """A hold button per card plus Draw, for one /poker hand.
+
+    Same money handling as BlackjackView: the bet is already taken, and
+    settle() pays out exactly once, after the draw. Walking away doesn't
+    forfeit: on timeout it draws with whatever was being held."""
+
+    def __init__(self, game: economy.PokerGame, guild_id: int, author: discord.abc.User):
+        super().__init__(timeout=120)
+        self.game = game
+        self.guild_id = guild_id
+        self.author = author
+        self.balance: int | None = None  # set by settle()
+        self.timed_out = False
+        self.message: discord.Message | None = None
+        self.card_buttons = []
+        for index in range(5):
+            button = discord.ui.Button(row=0)
+            button.callback = self._hold_callback(index)
+            self.add_item(button)
+            self.card_buttons.append(button)
+        self._refresh_buttons()
+
+    def _hold_callback(self, index: int):
+        async def callback(interaction: discord.Interaction):
+            self.game.toggle_hold(index)
+            await self._show(interaction)
+        return callback
+
+    def settle(self):
+        if self.game.finished and self.balance is None:
+            self.balance = economy.pay(self.guild_id, self.author.id, self.game.payout())
+
+    def embed(self) -> discord.Embed:
+        game = self.game
+        lines = [
+            f"♠️ **Video Poker** — {self.author.display_name} bets {economy.format_coins(game.bet)}",
+            "",
+            f"# {' '.join(game.cards)}",
+        ]
+        if not game.finished:
+            lines.append(f"Dealt: **{game.hand}**" if game.hand else "Dealt: no paying hand yet")
+            lines.append("Tap the cards to hold, then **Draw** to replace the rest.")
+        else:
+            if self.timed_out:
+                lines.append("⏱️ Took too long, so it drew with the cards you were holding.")
+            lines.append(game.result_line())
+            lines.append(economy.outcome_line(game.bet, game.payout(), self.balance))
+        return _embed("\n".join(lines))
+
+    def _refresh_buttons(self):
+        if self.game.finished:
+            self.clear_items()
+            return
+        for button, card, held in zip(self.card_buttons, self.game.cards, self.game.held):
+            button.label = f"{card} ✓" if held else card
+            button.style = discord.ButtonStyle.success if held else discord.ButtonStyle.secondary
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message(
+                "Only the person who ran /poker can play this hand.", ephemeral=True
+            )
+            return False
+        # A hold clicked just as Draw lands must not touch a paid-out hand.
+        if self.game.finished:
+            await interaction.response.defer()
+            return False
+        return True
+
+    async def _show(self, interaction: discord.Interaction):
+        self.settle()
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+        if self.game.finished:
+            self.stop()
+
+    @discord.ui.button(label="Draw", style=discord.ButtonStyle.primary, row=1)
+    async def draw_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.game.draw()
+        await self._show(interaction)
+
+    async def on_timeout(self):
+        if not self.game.finished:
+            self.timed_out = True
+            self.game.draw()
         self.settle()
         self._refresh_buttons()
         if self.message:
@@ -962,6 +1058,18 @@ def run_discord_bot():
             return
         view.message = await ctx.send(embed=view.embed(), view=view)
 
+    @client.hybrid_command(name="poker", description="Play a hand of video poker (Jacks or Better)")
+    @discord.app_commands.describe(bet="How many coins to bet — leave empty to see the payouts")
+    @commands.guild_only()
+    async def poker(ctx: commands.Context, bet: commands.Range[int, 1] = None):
+        if bet is None:
+            await ctx.send(embed=_embed(f"♠️ **Video Poker** — Jacks or Better\n\n{economy.poker_paytable()}"))
+            return
+        if not await _take_bet(ctx, bet):
+            return
+        view = PokerView(economy.PokerGame(bet), ctx.guild.id, ctx.author)
+        view.message = await ctx.send(embed=view.embed(), view=view)
+
     @client.hybrid_command(name="leaderboard", description="The richest people in this server")
     @commands.guild_only()
     async def leaderboard(ctx: commands.Context):
@@ -1100,7 +1208,7 @@ def run_discord_bot():
         else:
             raise error
 
-    for command in (work, mine, balance, donate, slots, roulette, blackjack, bet, horsebet, mybets, leaderboard):
+    for command in (work, mine, balance, donate, slots, roulette, blackjack, poker, bet, horsebet, mybets, leaderboard):
         command.error(economy_error)
 
     @client.hybrid_command(name="help", description="Lists every command DJ Shinx offers")
