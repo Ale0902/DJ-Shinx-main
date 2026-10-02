@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import responses
 import botFunctions as bf
 import channel_config
+import economy
 import game_news
 import link_preview
 import llmask
@@ -204,6 +205,12 @@ COMMAND_CATEGORIES = {
     'ping': 'Fun',
     'coin_flip': 'Fun',
     '8ball': 'Fun',
+    'work': 'Economy',
+    'balance': 'Economy',
+    'slots': 'Economy',
+    'roulette': 'Economy',
+    'blackjack': 'Economy',
+    'leaderboard': 'Economy',
     'mcstatus': 'Other',
     'steamsales': 'Other',
     'setchannel': 'Other',
@@ -211,7 +218,7 @@ COMMAND_CATEGORIES = {
     'forget': 'AI',
     'forgetme': 'AI',
 }
-CATEGORY_ORDER = ['Sports', 'Music', 'Fun', 'AI', 'Other']
+CATEGORY_ORDER = ['Sports', 'Music', 'Fun', 'Economy', 'AI', 'Other']
 
 # Folder that contains this script, so file paths work on Windows and Linux
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -352,6 +359,116 @@ class SetChannelView(discord.ui.View):
         if self.message:
             try:
                 await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
+async def _take_bet(ctx: commands.Context, bet: int) -> bool:
+    """Takes a bet out of the player's wallet before a game is played,
+    or tells them they can't afford it and returns False."""
+    if economy.take_bet(ctx.guild.id, ctx.author.id, bet):
+        return True
+    coins = economy.get_balance(ctx.guild.id, ctx.author.id)
+    await ctx.send(
+        embed=_embed(
+            f"You only have {economy.format_coins(coins)} — not enough to bet "
+            f"{economy.format_coins(bet)}. /work pays {economy.format_coins(economy.WORK_PAYOUT)} once a day."
+        ),
+        ephemeral=True,
+    )
+    return False
+
+
+class BlackjackView(discord.ui.View):
+    """Hit / Stand / Double Down buttons for one /blackjack hand.
+
+    The bet is already out of the player's wallet by the time this
+    exists, and settle() pays back whatever the hand returns exactly
+    once, when it ends. Walking away doesn't forfeit: on timeout the
+    player stands on what they're holding. A bot restart mid-hand does
+    lose the bet, since the hand only lives in memory."""
+
+    def __init__(self, game: economy.BlackjackGame, guild_id: int, author: discord.abc.User):
+        super().__init__(timeout=120)
+        self.game = game
+        self.guild_id = guild_id
+        self.author = author
+        self.original_bet = game.bet
+        self.balance: int | None = None  # set by settle()
+        self.timed_out = False
+        self.message: discord.Message | None = None
+        self._refresh_buttons()
+
+    def settle(self):
+        if self.game.finished and self.balance is None:
+            self.balance = economy.pay(self.guild_id, self.author.id, self.game.payout())
+
+    def embed(self) -> discord.Embed:
+        lines = [f"🃏 **Blackjack** — {self.author.display_name} bets {economy.format_coins(self.game.bet)}", "", self.game.render()]
+        if self.game.finished:
+            lines.append("")
+            if self.timed_out:
+                lines.append("⏱️ Took too long, so you stood automatically.")
+            lines.append(self.game.result_line())
+            lines.append(economy.outcome_line(self.game.bet, self.game.payout(), self.balance))
+        return _embed("\n".join(lines))
+
+    def _refresh_buttons(self):
+        if self.game.finished:
+            self.clear_items()
+        else:
+            self.double_button.disabled = not self.game.can_double
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message(
+                "Only the person who ran /blackjack can play this hand.", ephemeral=True
+            )
+            return False
+        # Two quick clicks can both be queued before the first one ends
+        # the hand -- the second must not deal into a hand that's paid out.
+        if self.game.finished:
+            await interaction.response.defer()
+            return False
+        return True
+
+    async def _show(self, interaction: discord.Interaction):
+        self.settle()
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+        if self.game.finished:
+            self.stop()
+
+    @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary)
+    async def hit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.game.hit()
+        await self._show(interaction)
+
+    @discord.ui.button(label="Stand", style=discord.ButtonStyle.secondary)
+    async def stand_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.game.stand()
+        await self._show(interaction)
+
+    @discord.ui.button(label="Double Down", style=discord.ButtonStyle.success)
+    async def double_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not economy.take_bet(self.guild_id, self.author.id, self.original_bet):
+            await interaction.response.send_message(
+                f"Doubling down costs another {economy.format_coins(self.original_bet)}, and you don't have it.",
+                ephemeral=True,
+            )
+            return
+        self.game.double_down()
+        await self._show(interaction)
+
+    async def on_timeout(self):
+        if not self.game.finished:
+            self.timed_out = True
+            self.game.stand()
+        self.settle()
+        self._refresh_buttons()
+        if self.message:
+            try:
+                await self.message.edit(embed=self.embed(), view=self)
             except discord.HTTPException:
                 pass
 
@@ -645,6 +762,150 @@ def run_discord_bot():
             await ctx.send(embed=_embed(f"Done — deleted {deleted} thing{'s' if deleted != 1 else ''} I'd remembered about you."))
         else:
             await ctx.send(embed=_embed("There wasn't anything long-term saved about you to delete."))
+
+    # Economy: play money per server (see economy.py). Every command is
+    # guild_only because balances belong to a server, and a DM has none.
+
+    @client.hybrid_command(name="work", description=f"Earn {economy.WORK_PAYOUT} coins — once a day")
+    @commands.guild_only()
+    async def work(ctx: commands.Context):
+        coins = economy.work(ctx.guild.id, ctx.author.id)
+        if coins is None:
+            wait = economy.format_duration(economy.time_until_work_resets())
+            await ctx.send(embed=_embed(f"You've already worked today. Your next shift starts in **{wait}**."), ephemeral=True)
+            return
+        job = random.choice(economy.WORK_JOBS)
+        await ctx.send(embed=_embed(
+            f"💼 You {job} and earned {economy.format_coins(economy.WORK_PAYOUT)}.\n"
+            f"Balance: {economy.format_coins(coins)}"
+        ))
+
+    @client.hybrid_command(name="balance", description="How many coins you (or someone else) have")
+    @discord.app_commands.describe(member="Whose balance to check — leave empty for your own")
+    @commands.guild_only()
+    async def balance(ctx: commands.Context, member: discord.Member = None):
+        member = member or ctx.author
+        coins = economy.get_balance(ctx.guild.id, member.id)
+        whose = "You have" if member.id == ctx.author.id else f"{member.mention} has"
+        await ctx.send(embed=_embed(f"{whose} {economy.format_coins(coins)}."))
+
+    @client.hybrid_command(name="slots", description="Spin the slot machine")
+    @discord.app_commands.describe(bet="How many coins to bet — leave empty to see the payouts")
+    @commands.guild_only()
+    async def slots(ctx: commands.Context, bet: commands.Range[int, 1] = None):
+        if bet is None:
+            await ctx.send(embed=_embed(f"🎰 **Slots**\n\n{economy.slots_paytable()}"))
+            return
+        if not await _take_bet(ctx, bet):
+            return
+        # Settled before the reels are shown, so the animation can't be
+        # interrupted halfway with the money still in limbo.
+        reels, multiplier = economy.spin_slots()
+        returned = bet * multiplier
+        coins = economy.pay(ctx.guild.id, ctx.author.id, returned)
+
+        header = f"🎰 **Slots** — {ctx.author.display_name} bets {economy.format_coins(bet)}"
+        hidden = [economy.SLOT_HIDDEN] * 3
+        message = await ctx.send(embed=_embed(f"{header}\n\n# {' '.join(hidden)}"))
+        for revealed in (1, 2):
+            await asyncio.sleep(0.7)
+            shown = reels[:revealed] + hidden[revealed:]
+            with contextlib.suppress(discord.HTTPException):
+                await message.edit(embed=_embed(f"{header}\n\n# {' '.join(shown)}"))
+        await asyncio.sleep(0.7)
+
+        if multiplier == 0:
+            verdict = "No luck this time."
+        elif multiplier == 1:
+            verdict = "A pair — your bet comes back."
+        else:
+            verdict = f"**{multiplier}× payout!**"
+        await message.edit(embed=_embed(
+            f"{header}\n\n# {' '.join(reels)}\n{verdict}\n{economy.outcome_line(bet, returned, coins)}"
+        ))
+
+    @client.hybrid_command(name="roulette", description="Bet on a spin of the roulette wheel")
+    @discord.app_commands.describe(
+        bet="How many coins to bet",
+        space="red, black, odd, even, 1-18, 19-36, 1-12, 13-24, 25-36, green, or a number 0-36",
+    )
+    @commands.guild_only()
+    async def roulette(ctx: commands.Context, bet: commands.Range[int, 1], *, space: str):
+        choice = economy.parse_roulette_bet(space)
+        if choice is None:
+            await ctx.send(embed=_embed(
+                f"**{space}** isn't something you can bet on. Try red, black, odd, even, "
+                f"1-18, 19-36, 1-12, 13-24, 25-36, green, or a number from 0 to 36."
+            ), ephemeral=True)
+            return
+        if not await _take_bet(ctx, bet):
+            return
+        number = economy.spin_roulette()
+        returned = bet * choice.multiplier if number in choice.numbers else 0
+        coins = economy.pay(ctx.guild.id, ctx.author.id, returned)
+
+        header = (
+            f"🎡 **Roulette** — {ctx.author.display_name} bets "
+            f"{economy.format_coins(bet)} on **{choice.label}**"
+        )
+        message = await ctx.send(embed=_embed(f"{header}\n\nThe ball is spinning..."))
+        await asyncio.sleep(2)
+        verdict = "✅ **Winner!**" if returned else "❌ **No luck.**"
+        await message.edit(embed=_embed(
+            f"{header}\n\nThe ball lands on **{economy.roulette_pocket(number)}**\n"
+            f"{verdict}\n{economy.outcome_line(bet, returned, coins)}"
+        ))
+
+    @roulette.autocomplete('space')
+    async def roulette_space_autocomplete(interaction: discord.Interaction, current: str):
+        return [
+            discord.app_commands.Choice(name=name, value=value)
+            for name, value in economy.roulette_suggestions(current)
+        ]
+
+    @client.hybrid_command(name="blackjack", description="Play a hand of blackjack against the dealer")
+    @discord.app_commands.describe(bet="How many coins to bet")
+    @commands.guild_only()
+    async def blackjack(ctx: commands.Context, bet: commands.Range[int, 1]):
+        if not await _take_bet(ctx, bet):
+            return
+        view = BlackjackView(economy.BlackjackGame(bet), ctx.guild.id, ctx.author)
+        if view.game.finished:
+            # A blackjack on the deal: nothing to decide, so no buttons.
+            view.settle()
+            await ctx.send(embed=view.embed())
+            return
+        view.message = await ctx.send(embed=view.embed(), view=view)
+
+    @client.hybrid_command(name="leaderboard", description="The richest people in this server")
+    @commands.guild_only()
+    async def leaderboard(ctx: commands.Context):
+        rows = economy.leaderboard(ctx.guild.id)
+        if not rows:
+            await ctx.send(embed=_embed("Nobody here has any coins yet — /work to get started."))
+            return
+        medals = ["🥇", "🥈", "🥉"]
+        lines = ["## 🏆 Richest in the server"]
+        for place, (user_id, coins) in enumerate(rows):
+            rank = medals[place] if place < len(medals) else f"`#{place + 1}`"
+            # A mention inside an embed shows the name without pinging anyone.
+            lines.append(f"{rank} <@{user_id}> — {economy.format_coins(coins)}")
+        await ctx.send(embed=_embed("\n".join(lines)))
+
+    async def economy_error(ctx: commands.Context, error: commands.CommandError):
+        if isinstance(error, commands.NoPrivateMessage):
+            await ctx.send(embed=_embed("Coins belong to a server — use this in one, not a DM."), ephemeral=True)
+        elif isinstance(error, commands.RangeError):
+            await ctx.send(embed=_embed("Bets have to be at least 1 coin."), ephemeral=True)
+        elif isinstance(error, (commands.BadArgument, commands.MissingRequiredArgument)):
+            await ctx.send(
+                embed=_embed(f"Usage: `!{ctx.command.name} {ctx.command.signature}`"), ephemeral=True
+            )
+        else:
+            raise error
+
+    for command in (work, balance, slots, roulette, blackjack, leaderboard):
+        command.error(economy_error)
 
     @client.hybrid_command(name="help", description="Lists every command DJ Shinx offers")
     async def help_command(ctx: commands.Context):
