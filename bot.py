@@ -353,22 +353,52 @@ def _missing_announce_permissions(channel, me: discord.Member) -> list[str]:
     return [label for attr, label in ANNOUNCE_PERMISSIONS.items() if not getattr(permissions, attr)]
 
 
-def _announcement_status(guild: discord.Guild) -> str:
+def _not_a_member_notice(client: discord.Client, guild_id: int) -> str:
+    """For a server where only the bot's slash commands are installed, with
+    no bot member: an app added for its commands alone, or a bot that was
+    removed. Commands still reply there -- Discord delivers them either way
+    -- but nothing can post in it on its own, announcements included. The
+    link adds the bot as a member (the "bot" scope a commands-only install
+    leaves out), preset to this server, with what announcements need."""
+    invite = discord.utils.oauth_url(
+        client.user.id,
+        permissions=discord.Permissions(**dict.fromkeys(ANNOUNCE_PERMISSIONS, True)),
+        guild=discord.Object(id=guild_id),
+        scopes=('bot', 'applications.commands'),
+        disable_guild_select=True,
+    )
+    return (
+        "⚠️ **I'm not actually in this server** — only my slash commands are, which is why they "
+        "reply but nothing gets posted here on its own. "
+        f"**[Add me to the server]({invite})** and announcements will start going to the channels below."
+    )
+
+
+def _announcement_status(guild_id: int, client: discord.Client) -> str:
     """Where each announcement feature posts in this server, and anything
     stopping it. Every feature is set up separately per server, so one that
     was never set up here looks exactly like one that's broken -- this is
     what tells them apart."""
-    configured = channel_config.get_for_guild(guild.id)
-    lines = ["**Announcements in this server**"]
+    configured = channel_config.get_for_guild(guild_id)
+    # Looked up by id rather than taken from the command: a server the bot
+    # is in always comes from its own cache, while one it isn't in reaches a
+    # command as an empty stand-in with no channels -- so every channel
+    # would read as deleted when the real problem is the missing bot.
+    member_of = client.get_guild(guild_id)
+    lines = [_not_a_member_notice(client, guild_id), ""] if member_of is None else []
+    lines.append("**Announcements in this server**")
     for key, label in channel_config.FEATURES.items():
         if key not in configured:
             lines.append(f"❌ {label} — not set up")
             continue
-        channel = guild.get_channel(configured[key])
+        if member_of is None:
+            lines.append(f"⏸️ {label} → <#{configured[key]}>, once I'm in")
+            continue
+        channel = member_of.get_channel(configured[key])
         if channel is None:
             lines.append(f"⚠️ {label} — its channel was deleted")
             continue
-        missing = _missing_announce_permissions(channel, guild.me)
+        missing = _missing_announce_permissions(channel, member_of.me)
         if missing:
             lines.append(f"⚠️ {label} → {channel.mention}, but I'm missing {', '.join(missing)} there")
         else:
@@ -416,49 +446,60 @@ class _SetChannelChannelSelect(discord.ui.ChannelSelect):
         self.parent_view = parent_view
 
     async def callback(self, interaction: discord.Interaction):
+        # Acknowledged first: the checks and the test post below are more
+        # requests, and an interaction has to be answered within 3 seconds.
+        await interaction.response.defer()
         picked = self.values[0]
-        guild = interaction.guild
-        channel = picked.resolve()
         labels = ", ".join(f"**{channel_config.FEATURES[key]}**" for key in self.parent_view.features)
 
-        if guild is not None and channel is not None:
-            missing = _missing_announce_permissions(channel, guild.me)
-            if missing:
-                # Not saved: announcements sent there would only fail quietly.
-                # The picker stays up to choose another channel instead.
-                await interaction.response.edit_message(
-                    embed=_embed(
-                        f"⚠️ I can't post in {picked.mention} — I'm missing **{', '.join(missing)}** there. "
-                        f"Give me those, or pick another channel for {labels}:"
-                    ),
-                    view=self.parent_view,
-                )
-                return
+        # guild_id comes straight off the interaction payload; the guild
+        # itself only exists in the cache if the bot is really a member.
+        guild = interaction.client.get_guild(interaction.guild_id)
+        if guild is None:
+            # Not saved as if it worked: nothing can post here until the bot
+            # is added. Anything already set up still shows, waiting.
+            self.parent_view.clear_items()
+            await interaction.edit_original_response(
+                embed=_embed(_announcement_status(interaction.guild_id, interaction.client)),
+                view=self.parent_view,
+            )
+            self.parent_view.stop()
+            return
 
-        # Acknowledged first: the test post below is a second request, and
-        # an interaction has to be answered within three seconds.
-        await interaction.response.defer()
-        # interaction.guild is a cache lookup and can come back None; guild_id
-        # comes straight off the interaction payload and is always present.
+        channel = guild.get_channel(picked.id)
+        problem = None
+        if channel is None:
+            problem = f"I can't see {picked.mention}."
+        elif missing := _missing_announce_permissions(channel, guild.me):
+            problem = f"I can't post in {picked.mention} — I'm missing **{', '.join(missing)}** there."
+        if problem:
+            # Not saved: announcements sent there would only fail quietly.
+            # The picker stays up to choose another channel instead.
+            await interaction.edit_original_response(
+                embed=_embed(f"⚠️ {problem} Give me access there, or pick another channel for {labels}:"),
+                view=self.parent_view,
+            )
+            return
+
         for key in self.parent_view.features:
-            channel_config.set_channel(interaction.guild_id, key, picked.id)
+            channel_config.set_channel(guild.id, key, channel.id)
 
-        result = f"✅ {labels} will now post in {picked.mention}."
-        if channel is not None:
-            # A real post, not just a permission check, so it's plain right
-            # away whether announcements will actually show up there.
-            try:
-                await channel.send(embed=_embed(f"📣 Announcements set up here: {labels}."))
-                result += " I posted a test message there."
-            except discord.HTTPException as e:
-                result = (
-                    f"⚠️ Saved, but my test message in {picked.mention} failed: {e.text or e}. "
-                    f"Announcements won't show up there until that's fixed."
-                )
+        # A real post, not just a permission check, so it's plain right away
+        # whether announcements will actually show up there.
+        try:
+            await channel.send(embed=_embed(f"📣 Announcements set up here: {labels}."))
+            result = f"✅ {labels} will now post in {channel.mention}. I posted a test message there."
+        except discord.HTTPException as e:
+            result = (
+                f"⚠️ Saved, but my test message in {channel.mention} failed: {e.text or e}. "
+                f"Announcements won't show up there until that's fixed."
+            )
 
-        status = f"\n\n{_announcement_status(guild)}" if guild is not None else ""
         self.parent_view.clear_items()
-        await interaction.edit_original_response(embed=_embed(result + status), view=self.parent_view)
+        await interaction.edit_original_response(
+            embed=_embed(f"{result}\n\n{_announcement_status(guild.id, interaction.client)}"),
+            view=self.parent_view,
+        )
         self.parent_view.stop()
 
 
@@ -906,7 +947,7 @@ def run_discord_bot():
         view = SetChannelView(author_id=ctx.author.id)
         message = await ctx.send(
             embed=_embed(
-                f"{_announcement_status(ctx.guild)}\n\n"
+                f"{_announcement_status(ctx.guild.id, ctx.bot)}\n\n"
                 "Step 1: choose the features to set up — pick several to send them all to one channel."
             ),
             view=view,
@@ -1449,7 +1490,7 @@ def run_discord_bot():
                 except discord.HTTPException as e:
                     logger.warning(
                         f"{feature}: can't reach channel {channel_id} in guild {guild_id} "
-                        f"(deleted, or bot lacks View Channel?): {e}"
+                        f"(deleted, the bot isn't in that server, or it lacks View Channel?): {e}"
                     )
                     continue
             try:
