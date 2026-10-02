@@ -1,5 +1,5 @@
 """A play-money economy for each server: /work pays a random amount every
-30 minutes and /mine a smaller one as often as you like, and slots, roulette and
+30 minutes and /mine a smaller one up to 10 times a half hour, and slots, roulette and
 blackjack let people bet it to try to grow it. Coins are worth nothing outside the bot and can't be bought.
 
 Every server has its own separate economy -- balances are keyed by
@@ -63,9 +63,13 @@ WORK_JOBS = [
     "you saved a nearby planet and its inhabitants were thankful"
 ]
 
-# /mine pays less than /work, but has no cooldown at all.
+# /mine pays less than /work, but can be used MINE_LIMIT times in each
+# MINE_WINDOW_MINUTES (counted from the first /mine of the window).
+# bot.py enforces the limit with a cooldown on the command itself.
 MINE_MIN = 15
 MINE_MAX = 60
+MINE_LIMIT = 10
+MINE_WINDOW_MINUTES = 30
 
 # Flavor text for /mine -- unrelated to how much it pays.
 MINE_FINDS = [
@@ -181,8 +185,8 @@ def time_until_next_work(guild_id, user_id) -> datetime.timedelta:
 
 
 def mine(guild_id, user_id) -> tuple[int, int]:
-    """Pays MINE_MIN–MINE_MAX coins, as often as the user likes. Returns
-    (amount earned, new balance)."""
+    """Pays MINE_MIN–MINE_MAX coins. Returns (amount earned, new balance).
+    How often it can be used is up to /mine's cooldown in bot.py."""
     earned = random.randint(MINE_MIN, MINE_MAX)
     return earned, pay(guild_id, user_id, earned)
 

@@ -384,7 +384,8 @@ async def _take_bet(ctx: commands.Context, bet: int) -> bool:
             f"You only have {economy.format_coins(coins)} — not enough to bet "
             f"{economy.format_coins(bet)}. /work pays **{economy.WORK_MIN}–{economy.WORK_MAX}** "
             f"{economy.COIN} every {economy.WORK_EVERY}, and /mine pays "
-            f"**{economy.MINE_MIN}–{economy.MINE_MAX}** {economy.COIN} any time."
+            f"**{economy.MINE_MIN}–{economy.MINE_MAX}** {economy.COIN} up to {economy.MINE_LIMIT} times "
+            f"every {economy.MINE_WINDOW_MINUTES} minutes."
         ),
         ephemeral=True,
     )
@@ -816,9 +817,16 @@ def run_discord_bot():
 
     @client.hybrid_command(
         name="mine",
-        description=f"Earn {economy.MINE_MIN}–{economy.MINE_MAX} coins — no cooldown",
+        description=(
+            f"Earn {economy.MINE_MIN}–{economy.MINE_MAX} coins — up to {economy.MINE_LIMIT} times "
+            f"every {economy.MINE_WINDOW_MINUTES} minutes"
+        ),
     )
     @commands.guild_only()
+    # Per member per server, like wallets. Kept in memory, like /chat's, so
+    # a bot restart hands everyone a fresh set of mines -- a few hundred
+    # coins at most, not worth tracking in economy.db.
+    @commands.cooldown(economy.MINE_LIMIT, economy.MINE_WINDOW_MINUTES * 60, commands.BucketType.member)
     async def mine(ctx: commands.Context):
         earned, coins = economy.mine(ctx.guild.id, ctx.author.id)
         find = random.choice(economy.MINE_FINDS)
@@ -1078,6 +1086,13 @@ def run_discord_bot():
         elif isinstance(error, commands.RangeError):
             what = "Donations" if ctx.command.name == 'donate' else "Bets"
             await ctx.send(embed=_embed(f"{what} have to be at least 1 coin."), ephemeral=True)
+        elif isinstance(error, commands.CommandOnCooldown):
+            # Only /mine has a cooldown decorator; /work's cooldown lives in economy.db.
+            wait = economy.format_duration(datetime.timedelta(seconds=error.retry_after))
+            await ctx.send(embed=_embed(
+                f"⛏️ Your pickaxe needs a rest — that's {economy.MINE_LIMIT} mines in "
+                f"{economy.MINE_WINDOW_MINUTES} minutes. You can mine again in **{wait}**."
+            ), ephemeral=True)
         elif isinstance(error, (commands.BadArgument, commands.MissingRequiredArgument)):
             await ctx.send(
                 embed=_embed(f"Usage: `!{ctx.command.name} {ctx.command.signature}`"), ephemeral=True
