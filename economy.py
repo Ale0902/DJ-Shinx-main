@@ -1,5 +1,5 @@
 """A play-money economy for each server: /work pays a random amount every
-hour and /mine a smaller one as often as you like, and slots, roulette and
+30 minutes and /mine a smaller one as often as you like, and slots, roulette and
 blackjack let people bet it to try to grow it. Coins are worth nothing outside the bot and can't be bought.
 
 Every server has its own separate economy -- balances are keyed by
@@ -29,9 +29,13 @@ COIN = "🪙"
 WORK_MIN = 200
 WORK_MAX = 700
 # How long after a /work shift until the next one pays.
-WORK_COOLDOWN_HOURS = 1
-# For the bot's messages: "every hour" / "every 2 hours".
-WORK_EVERY = "hour" if WORK_COOLDOWN_HOURS == 1 else f"{WORK_COOLDOWN_HOURS} hours"
+WORK_COOLDOWN_MINUTES = 30
+# For the bot's messages: "every 30 minutes" / "every hour" / "every 2 hours".
+WORK_EVERY = (
+    f"{WORK_COOLDOWN_MINUTES} minutes" if WORK_COOLDOWN_MINUTES % 60
+    else "hour" if WORK_COOLDOWN_MINUTES == 60
+    else f"{WORK_COOLDOWN_MINUTES // 60} hours"
+)
 
 # Flavor text for /work -- unrelated to how much it pays.
 WORK_JOBS = [
@@ -131,7 +135,7 @@ def get_balance(guild_id, user_id) -> int:
     return row[0] if row else 0
 
 
-WORK_COOLDOWN = datetime.timedelta(hours=WORK_COOLDOWN_HOURS)
+WORK_COOLDOWN = datetime.timedelta(minutes=WORK_COOLDOWN_MINUTES)
 
 
 def _timestamp(moment: datetime.datetime) -> str:
@@ -144,7 +148,7 @@ def _timestamp(moment: datetime.datetime) -> str:
 
 def work(guild_id, user_id) -> tuple[int, int] | None:
     """Pays between WORK_MIN and WORK_MAX coins if this user hasn't worked
-    in this server in the last WORK_COOLDOWN_HOURS. Returns (amount
+    in this server in the last WORK_COOLDOWN_MINUTES. Returns (amount
     earned, new balance), or None if they have. A single statement does
     both the check and the payment, so two /work calls landing at once
     can't both pay out."""
