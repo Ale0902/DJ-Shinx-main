@@ -337,24 +337,67 @@ class PaginatorView(discord.ui.View):
                 pass
 
 
+# What the bot needs in a channel to post announcements there: to see it,
+# send in it, and send embeds -- plus attach files, since Song of the Day's
+# album art goes up as an upload.
+ANNOUNCE_PERMISSIONS = {
+    'view_channel': "View Channel",
+    'send_messages': "Send Messages",
+    'embed_links': "Embed Links",
+    'attach_files': "Attach Files",
+}
+
+
+def _missing_announce_permissions(channel, me: discord.Member) -> list[str]:
+    permissions = channel.permissions_for(me)
+    return [label for attr, label in ANNOUNCE_PERMISSIONS.items() if not getattr(permissions, attr)]
+
+
+def _announcement_status(guild: discord.Guild) -> str:
+    """Where each announcement feature posts in this server, and anything
+    stopping it. Every feature is set up separately per server, so one that
+    was never set up here looks exactly like one that's broken -- this is
+    what tells them apart."""
+    configured = channel_config.get_for_guild(guild.id)
+    lines = ["**Announcements in this server**"]
+    for key, label in channel_config.FEATURES.items():
+        if key not in configured:
+            lines.append(f"❌ {label} — not set up")
+            continue
+        channel = guild.get_channel(configured[key])
+        if channel is None:
+            lines.append(f"⚠️ {label} — its channel was deleted")
+            continue
+        missing = _missing_announce_permissions(channel, guild.me)
+        if missing:
+            lines.append(f"⚠️ {label} → {channel.mention}, but I'm missing {', '.join(missing)} there")
+        else:
+            lines.append(f"✅ {label} → {channel.mention}")
+    return "\n".join(lines)
+
+
 class _SetChannelFeatureSelect(discord.ui.Select):
-    """Step 1 of /setchannel: pick which feature to configure."""
+    """Step 1 of /setchannel: pick which features to set up -- one, or
+    several to send them all to the same channel at once."""
 
     def __init__(self, parent_view: "SetChannelView"):
         options = [
             discord.SelectOption(label=label, value=key)
             for key, label in channel_config.FEATURES.items()
         ]
-        super().__init__(placeholder="Step 1: choose a feature to configure...", options=options)
+        super().__init__(
+            placeholder="Step 1: choose features to set up...",
+            options=options, min_values=1, max_values=len(options),
+        )
         self.parent_view = parent_view
 
     async def callback(self, interaction: discord.Interaction):
-        self.parent_view.feature = self.values[0]
-        label = channel_config.FEATURES[self.values[0]]
+        self.parent_view.features = list(self.values)
+        labels = ", ".join(f"**{channel_config.FEATURES[key]}**" for key in self.values)
         self.parent_view.clear_items()
         self.parent_view.add_item(_SetChannelChannelSelect(self.parent_view))
         await interaction.response.edit_message(
-            embed=_embed(f"**{label}** selected. Now pick a channel:"),
+            embed=_embed(f"{labels} selected. Now pick a channel:"),
             view=self.parent_view,
         )
 
@@ -366,33 +409,68 @@ class _SetChannelChannelSelect(discord.ui.ChannelSelect):
     def __init__(self, parent_view: "SetChannelView"):
         super().__init__(
             placeholder="Step 2: choose a channel...",
-            channel_types=[discord.ChannelType.text],
+            # Announcement channels too: it's where a lot of servers would
+            # want these, and the bot posts in one the same way.
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
         )
         self.parent_view = parent_view
 
     async def callback(self, interaction: discord.Interaction):
-        channel = self.values[0]
+        picked = self.values[0]
+        guild = interaction.guild
+        channel = picked.resolve()
+        labels = ", ".join(f"**{channel_config.FEATURES[key]}**" for key in self.parent_view.features)
+
+        if guild is not None and channel is not None:
+            missing = _missing_announce_permissions(channel, guild.me)
+            if missing:
+                # Not saved: announcements sent there would only fail quietly.
+                # The picker stays up to choose another channel instead.
+                await interaction.response.edit_message(
+                    embed=_embed(
+                        f"⚠️ I can't post in {picked.mention} — I'm missing **{', '.join(missing)}** there. "
+                        f"Give me those, or pick another channel for {labels}:"
+                    ),
+                    view=self.parent_view,
+                )
+                return
+
+        # Acknowledged first: the test post below is a second request, and
+        # an interaction has to be answered within three seconds.
+        await interaction.response.defer()
         # interaction.guild is a cache lookup and can come back None; guild_id
         # comes straight off the interaction payload and is always present.
-        channel_config.set_channel(interaction.guild_id, self.parent_view.feature, channel.id)
-        label = channel_config.FEATURES[self.parent_view.feature]
+        for key in self.parent_view.features:
+            channel_config.set_channel(interaction.guild_id, key, picked.id)
+
+        result = f"✅ {labels} will now post in {picked.mention}."
+        if channel is not None:
+            # A real post, not just a permission check, so it's plain right
+            # away whether announcements will actually show up there.
+            try:
+                await channel.send(embed=_embed(f"📣 Announcements set up here: {labels}."))
+                result += " I posted a test message there."
+            except discord.HTTPException as e:
+                result = (
+                    f"⚠️ Saved, but my test message in {picked.mention} failed: {e.text or e}. "
+                    f"Announcements won't show up there until that's fixed."
+                )
+
+        status = f"\n\n{_announcement_status(guild)}" if guild is not None else ""
         self.parent_view.clear_items()
-        await interaction.response.edit_message(
-            embed=_embed(f"✅ **{label}** will now post in {channel.mention}."),
-            view=self.parent_view,
-        )
+        await interaction.edit_original_response(embed=_embed(result + status), view=self.parent_view)
         self.parent_view.stop()
 
 
 class SetChannelView(discord.ui.View):
-    """Backs /setchannel's guided flow: pick a feature from a dropdown,
+    """Backs /setchannel's guided flow: pick features from a dropdown,
     then a channel from a native Discord picker, one step at a time --
     instead of typing feature and channel as command arguments."""
 
     def __init__(self, author_id):
         super().__init__(timeout=120)
         self.author_id = author_id
-        self.feature: str | None = None
+        self.features: list[str] = []
         self.message: discord.Message | None = None
         self.add_item(_SetChannelFeatureSelect(self))
 
@@ -821,12 +899,18 @@ def run_discord_bot():
         result = await asyncio.to_thread(bf.mc_status)
         await ctx.send(embed=_embed(result))
 
-    @client.hybrid_command(name="setchannel", description="Choose which channel an announcement feature posts into")
+    @client.hybrid_command(name="setchannel", description="See where announcements post in this server, and set them up")
     @commands.guild_only()
     @commands.has_permissions(manage_guild=True)
     async def setchannel(ctx: commands.Context):
         view = SetChannelView(author_id=ctx.author.id)
-        message = await ctx.send(embed=_embed("Step 1: choose a feature to configure."), view=view)
+        message = await ctx.send(
+            embed=_embed(
+                f"{_announcement_status(ctx.guild)}\n\n"
+                "Step 1: choose the features to set up — pick several to send them all to one channel."
+            ),
+            view=view,
+        )
         view.message = message
 
     @setchannel.error

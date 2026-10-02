@@ -56,6 +56,17 @@ def get_channel(guild_id, feature: str) -> int | None:
     return int(row[0]) if row else None
 
 
+def get_for_guild(guild_id) -> dict[str, int]:
+    """Returns {feature: channel_id} for every feature this guild has set
+    up -- what /setchannel shows, so a feature that was never set up in a
+    server can't be mistaken for one that's broken there."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT feature, channel_id FROM channels WHERE guild_id = ?", (str(guild_id),)
+        ).fetchall()
+    return {feature: int(channel_id) for feature, channel_id in rows}
+
+
 def get_all_for_feature(feature: str) -> dict[int, int]:
     """Returns {guild_id: channel_id} for every guild that has configured
     this feature -- lets a background announcement loop fan a single
