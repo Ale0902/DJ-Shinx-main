@@ -24,6 +24,7 @@ import update_log
 import f1
 import jra
 import jra_bets
+import nfl_props
 import os
 from dotenv import load_dotenv
 
@@ -220,6 +221,8 @@ COMMAND_CATEGORIES = {
     'poker': 'Economy',
     'bet': 'Economy',
     'horsebet': 'Economy',
+    'props': 'Economy',
+    'propbet': 'Economy',
     'mybets': 'Economy',
     'leaderboard': 'Economy',
     'mcstatus': 'Other',
@@ -1171,19 +1174,84 @@ def run_discord_bot():
         suggestions = await asyncio.to_thread(jra_bets.horse_suggestions, interaction.namespace.race or "", current)
         return [discord.app_commands.Choice(name=name, value=value) for name, value in suggestions]
 
+    @client.hybrid_command(name="props", description="An NFL game's prop menu: each team's QB, RB1, WR1 and defense lines")
+    @discord.app_commands.describe(game="Start typing a team — leave empty for the next game up")
+    async def props_command(ctx: commands.Context, *, game: str | None = None):
+        await ctx.defer()
+        text = await asyncio.to_thread(nfl_props.menu_text, game)
+        await ctx.send(embed=_embed(text))
+
+    @props_command.autocomplete('game')
+    async def props_game_autocomplete(interaction: discord.Interaction, current: str):
+        suggestions = await asyncio.to_thread(nfl_props.game_suggestions, current)
+        return [discord.app_commands.Choice(name=name, value=value) for name, value in suggestions]
+
+    @client.hybrid_command(name="propbet", description="Bet the over or under on an NFL QB, RB1, WR1 or defense this week")
+    @discord.app_commands.describe(
+        game="Start typing a team to pick from this week's games",
+        prop="Each team's QB, RB1, WR1 or defense — pick from the menu",
+        side="Over or under the line",
+        amount="How many coins to bet",
+    )
+    @commands.guild_only()
+    async def propbet(ctx: commands.Context, game: str, prop: str, side: str, amount: commands.Range[int, 1]):
+        await ctx.defer()  # building a game's menu from ESPN can take a moment
+
+        def place():
+            picked = nfl_props.resolve_side(side)
+            found = nfl_props.resolve_game(game)
+            chosen = nfl_props.resolve_prop(found, prop)
+            payout_pct = nfl_props.place_bet(ctx.guild.id, ctx.author.id, ctx.channel.id, found, chosen, picked, amount)
+            return found, chosen, picked, payout_pct
+
+        try:
+            found, chosen, picked, payout_pct = await asyncio.to_thread(place)
+        except nfl_props.BetError as e:
+            await ctx.send(embed=_embed(str(e)))
+            return
+        await ctx.send(embed=_embed(
+            f"🎟️ **Bet placed** — {ctx.author.display_name} puts {economy.format_coins(amount)} on "
+            f"**{chosen.subject} {picked} {chosen.line:g} {chosen.stat_label}**\n"
+            f"{found.describe()}\n"
+            f"Pays {economy.format_coins(amount * payout_pct // 100)} if it hits "
+            f"({economy.format_multiplier(payout_pct)}). You'll get pinged here when the game ends."
+        ))
+
+    @propbet.autocomplete('game')
+    async def propbet_game_autocomplete(interaction: discord.Interaction, current: str):
+        suggestions = await asyncio.to_thread(nfl_props.game_suggestions, current)
+        return [discord.app_commands.Choice(name=name, value=value) for name, value in suggestions]
+
+    @propbet.autocomplete('prop')
+    async def propbet_prop_autocomplete(interaction: discord.Interaction, current: str):
+        # Offers the menu of whichever game is already filled in.
+        suggestions = await asyncio.to_thread(nfl_props.prop_suggestions, interaction.namespace.game or "", current)
+        return [discord.app_commands.Choice(name=name, value=value) for name, value in suggestions]
+
+    @propbet.autocomplete('side')
+    async def propbet_side_autocomplete(interaction: discord.Interaction, current: str):
+        suggestions = await asyncio.to_thread(
+            nfl_props.side_suggestions, interaction.namespace.game or "", interaction.namespace.prop or ""
+        )
+        return [
+            discord.app_commands.Choice(name=name, value=value)
+            for name, value in suggestions if current.casefold() in name.casefold()
+        ]
+
     @client.hybrid_command(name="mybets", description="Your sports bets still waiting on a result")
     @commands.guild_only()
     async def mybets(ctx: commands.Context):
         texts = [
             text for text in (
                 sportsbook.open_bets_text(ctx.guild.id, ctx.author.id),
+                nfl_props.open_bets_text(ctx.guild.id, ctx.author.id),
                 jra_bets.open_bets_text(ctx.guild.id, ctx.author.id),
             ) if text
         ]
         if not texts:
             await ctx.send(embed=_embed(
                 "You don't have any open bets. /bet to put coins on a game today or tomorrow, "
-                "or /horsebet on a JRA race."
+                "/propbet on an NFL player or defense, or /horsebet on a JRA race."
             ))
             return
         await ctx.send(embed=_embed("🎟️ **Your open bets**\n" + "\n".join(texts)))
@@ -1208,7 +1276,7 @@ def run_discord_bot():
         else:
             raise error
 
-    for command in (work, mine, balance, donate, slots, roulette, blackjack, poker, bet, horsebet, mybets, leaderboard):
+    for command in (work, mine, balance, donate, slots, roulette, blackjack, poker, bet, propbet, horsebet, mybets, leaderboard):
         command.error(economy_error)
 
     @client.hybrid_command(name="help", description="Lists every command DJ Shinx offers")
@@ -1370,13 +1438,20 @@ def run_discord_bot():
         await _broadcast('steam_sales', send)
 
     @tasks.loop(minutes=5.0)
+    async def nfl_prop_menus():
+        # Rebuilds every game's /propbet menu in the background: building
+        # one cold takes ESPN a few seconds, and Discord only gives an
+        # autocomplete 3. warm_menus never raises, so this loop can't die.
+        await asyncio.to_thread(nfl_props.warm_menus)
+
+    @tasks.loop(minutes=5.0)
     async def sports_bet_results():
         # Pings each bettor in the channel they bet from, not a /setchannel
         # destination -- a bet result is personal. The coins are already
         # paid by the time this posts, so a send that fails only loses
         # the message.
         settlements = []
-        for settle in (sportsbook.settle_finished_bets, jra_bets.settle_finished_bets):
+        for settle in (sportsbook.settle_finished_bets, nfl_props.settle_finished_bets, jra_bets.settle_finished_bets):
             try:
                 settlements += await asyncio.to_thread(settle)
             except Exception as e:
@@ -1437,6 +1512,7 @@ def run_discord_bot():
         game_recaps.start()
         steam_sale_alerts.start()
         sports_bet_results.start()
+        nfl_prop_menus.start()
         logger.info(f'{client.user} is now running!')
         await client.tree.sync()
         await _post_update_log()
