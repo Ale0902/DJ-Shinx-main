@@ -264,21 +264,29 @@ def _competitor_result(event_id: str, competition_id: str, competitor: dict) -> 
         return None
 
 
-def _session_results_table(event_id: str, competition: dict) -> str | None:
-    """Returns a formatted, position-sorted results table for a session,
-    or None if no results could be fetched (e.g. transient API hiccup --
-    the caller should retry on a later poll rather than giving up)."""
+def _position(place) -> str:
+    """"P3" for a classified finish, or whatever ESPN says otherwise."""
+    try:
+        return f"P{int(float(place))}"
+    except (TypeError, ValueError):
+        return str(place)
+
+
+def _session_results(event_id: str, competition: dict) -> list[tuple[str, str, str, str]]:
+    """(place, driver, time, athlete id) for every driver in a session,
+    position-sorted -- [] unless every driver's result came back, so a
+    transient API hiccup is retried on a later poll rather than posting a
+    classification with drivers missing from it."""
     competitors = competition.get('competitors', [])
     if not competitors:
-        return None
+        return []
 
     def fetch(competitor: dict) -> tuple[str, str, str, str] | None:
         return _competitor_result(event_id, competition['id'], competitor)
 
     results = [r for r in _executor.map(fetch, competitors) if r]
-
-    if not results:
-        return None
+    if len(results) < len(competitors):
+        return []
 
     def sort_key(result: tuple[str, str, str, str]) -> int:
         try:
@@ -286,8 +294,18 @@ def _session_results_table(event_id: str, competition: dict) -> str | None:
         except (TypeError, ValueError):
             return 999
 
-    results.sort(key=sort_key)
+    return sorted(results, key=sort_key)
 
+
+def _session_results_table(event_id: str, competition: dict) -> str | None:
+    """Returns a formatted, position-sorted results table for a session,
+    or None if no results could be fetched (e.g. transient API hiccup --
+    the caller should retry on a later poll rather than giving up)."""
+    results = _session_results(event_id, competition)
+    return _results_table(results) if results else None
+
+
+def _results_table(results: list[tuple[str, str, str, str]]) -> str:
     teams = driver_teams([athlete_id for _, _, _, athlete_id in results])
 
     header = f"{'Pos':>3}  {'Driver':<22} Time"
@@ -319,14 +337,46 @@ def _race_day_message(event: dict, competitions: list[dict], race_abbrev: str) -
     return f"# IT'S {RACE_DAY_BANNERS[race_abbrev]} DAY!! 🏎️🏁\n**{event['name']}**{recap_text}"
 
 
-def _results_message(event: dict, competition: dict) -> str | None:
-    """A session's results announcement, or None if they couldn't be
-    fetched (a transient API hiccup -- worth retrying later)."""
-    table = _session_results_table(event['id'], competition)
-    if not table:
-        return None
-    label = SESSION_LABELS.get(competition['type']['abbreviation'], competition['type']['abbreviation'])
-    return f"## {label} Results — {event['name']}\n{table}"
+def _session_label(competition: dict) -> str:
+    abbrev = competition['type']['abbreviation']
+    return SESSION_LABELS.get(abbrev, abbrev)
+
+
+def _results_message(event: dict, competition: dict, results: list[tuple[str, str, str, str]]) -> str:
+    return f"## {_session_label(competition)} Results — {event['name']}\n{_results_table(results)}"
+
+
+# ESPN marks a session "End of Session" as soon as it's over and the
+# classification is in, but only flips it to final (completed) once it's
+# official -- for a practice session that was well over half an hour
+# later. Results go out at whichever comes first, and the final
+# classification is then checked against what was posted (see
+# _classification_changes), since stewards' penalties can still reorder a
+# qualifying session or a race after the flag.
+_SESSION_ENDED_STATUSES = {'STATUS_SESSION_COMPLETE', 'STATUS_FINAL'}
+
+
+def _session_ended(competition: dict) -> bool:
+    status = competition.get('status', {}).get('type', {})
+    return bool(status.get('completed')) or status.get('name') in _SESSION_ENDED_STATUSES
+
+
+def _classification_changes(posted: list, final: list) -> list[str]:
+    """One line per driver whose finishing position in the final
+    classification isn't the one first posted. Positions only: a time
+    alone being restated (a gap given to more decimals, say) isn't news,
+    and a penalty that matters moves someone."""
+    before = {athlete_id: (place, name) for place, name, _, athlete_id in posted}
+    lines = []
+    for place, name, _, athlete_id in final:
+        old = before.pop(athlete_id, None)
+        if old is None:
+            lines.append(f"• **{name}**: now {_position(place)}")
+        elif _position(old[0]) != _position(place):
+            lines.append(f"• **{name}**: {_position(old[0])} → {_position(place)}")
+    for old_place, name in before.values():
+        lines.append(f"• **{name}**: {_position(old_place)} → no longer classified")
+    return lines
 
 
 def check_f1_updates() -> list[str]:
@@ -367,6 +417,11 @@ def check_f1_updates() -> list[str]:
 
     competitions = sorted(event.get('competitions', []), key=lambda c: c['date'])
 
+    # The first classification posted for each session not yet final, kept
+    # to check the final one against: {session id: [[place, driver, time,
+    # athlete id], ...]}.
+    first_results = state.setdefault('first_results', {})
+
     for competition in competitions:
         comp_id = competition['id']
         abbrev = competition['type']['abbreviation']
@@ -385,11 +440,34 @@ def check_f1_updates() -> list[str]:
             done.append(day_marker)
 
         results_marker = f"results:{comp_id}"
-        if completed and results_marker not in done:
-            results = _results_message(event, competition)
+        final_marker = f"final:{comp_id}"
+        if _session_ended(competition) and results_marker not in done:
+            results = _session_results(event_id, competition)
             if results:
-                messages.append(results)
+                messages.append(_results_message(event, competition, results))
                 done.append(results_marker)
+                if completed:
+                    done.append(final_marker)  # what was posted already is the final classification
+                else:
+                    first_results[comp_id] = [list(result) for result in results]
+        elif completed and results_marker in done and final_marker not in done:
+            posted = first_results.get(comp_id)
+            if posted is None:
+                # Posted before first classifications were kept, so there's
+                # nothing to check the final one against.
+                done.append(final_marker)
+            else:
+                results = _session_results(event_id, competition)
+                if results:
+                    changes = _classification_changes(posted, results)
+                    if changes:
+                        messages.append(
+                            f"## {label} Results Updated — {event['name']}\n"
+                            f"The final classification changed since the first results:\n"
+                            + "\n".join(changes) + f"\n{_results_table(results)}"
+                        )
+                    done.append(final_marker)
+                    del first_results[comp_id]
 
     _save_state(state)
     return messages
@@ -422,9 +500,9 @@ def race_day_catch_up() -> list[str]:
             if abbrev not in RACE_DAY_BANNERS or race_date != today:
                 continue
             if f"results:{competition['id']}" in done:
-                results = _results_message(event, competition)
+                results = _session_results(event['id'], competition)
                 if results:
-                    messages.append(results)
+                    messages.append(_results_message(event, competition, results))
             elif f"day:{competition['id']}" in done:
                 messages.append(_race_day_message(event, competitions, abbrev))
         return messages
