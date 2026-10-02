@@ -18,6 +18,7 @@ import link_preview
 import llmask
 import memory_db
 import sports
+import sportsbook
 import steam_sales
 import update_log
 import f1
@@ -210,6 +211,8 @@ COMMAND_CATEGORIES = {
     'slots': 'Economy',
     'roulette': 'Economy',
     'blackjack': 'Economy',
+    'bet': 'Economy',
+    'mybets': 'Economy',
     'leaderboard': 'Economy',
     'mcstatus': 'Other',
     'steamsales': 'Other',
@@ -896,6 +899,61 @@ def run_discord_bot():
             lines.append(f"{rank} <@{user_id}> — {economy.format_coins(coins)}")
         await ctx.send(embed=_embed("\n".join(lines)))
 
+    @client.hybrid_command(name="bet", description="Bet on one of today's NFL or soccer games before it kicks off")
+    @discord.app_commands.describe(
+        game="Start typing a team to pick from today's games",
+        pick="Who wins — or a draw, for soccer",
+        amount="How many coins to bet",
+    )
+    @commands.guild_only()
+    async def bet(ctx: commands.Context, game: str, pick: str, amount: commands.Range[int, 1]):
+        await ctx.defer()  # checking the game with ESPN can take a moment
+
+        def place():
+            found = sportsbook.resolve_game(game)
+            chosen = sportsbook.resolve_pick(found, pick)
+            pays = sportsbook.place_bet(ctx.guild.id, ctx.author.id, ctx.channel.id, found, chosen, amount)
+            return found, chosen, pays
+
+        try:
+            found, chosen, pays = await asyncio.to_thread(place)
+        except sportsbook.BetError as e:
+            await ctx.send(embed=_embed(str(e)))
+            return
+        await ctx.send(embed=_embed(
+            f"🎟️ **Bet placed** — {ctx.author.display_name} puts {economy.format_coins(amount)} on "
+            f"**{found.pick_name(chosen)}**\n"
+            f"{found.describe()}\n"
+            f"Pays {economy.format_coins(pays)} if it hits "
+            f"({economy.format_multiplier(found.payouts[chosen])}). You'll get pinged here when it ends."
+        ))
+
+    @bet.autocomplete('game')
+    async def bet_game_autocomplete(interaction: discord.Interaction, current: str):
+        suggestions = await asyncio.to_thread(sportsbook.game_suggestions, current)
+        return [discord.app_commands.Choice(name=name, value=value) for name, value in suggestions]
+
+    @bet.autocomplete('pick')
+    async def bet_pick_autocomplete(interaction: discord.Interaction, current: str):
+        # Offers the teams of whichever game is already filled in.
+        chosen_game = await asyncio.to_thread(sportsbook.cached_game, interaction.namespace.game or "")
+        if chosen_game is None:
+            return []
+        return [
+            discord.app_commands.Choice(name=name, value=value)
+            for name, value in sportsbook.pick_suggestions(chosen_game)
+            if current.casefold() in name.casefold()
+        ]
+
+    @client.hybrid_command(name="mybets", description="Your sports bets still waiting on a result")
+    @commands.guild_only()
+    async def mybets(ctx: commands.Context):
+        text = sportsbook.open_bets_text(ctx.guild.id, ctx.author.id)
+        if text is None:
+            await ctx.send(embed=_embed("You don't have any open bets. /bet to put coins on one of today's games."))
+            return
+        await ctx.send(embed=_embed(f"🎟️ **Your open bets**\n{text}"))
+
     async def economy_error(ctx: commands.Context, error: commands.CommandError):
         if isinstance(error, commands.NoPrivateMessage):
             await ctx.send(embed=_embed("Coins belong to a server — use this in one, not a DM."), ephemeral=True)
@@ -908,7 +966,7 @@ def run_discord_bot():
         else:
             raise error
 
-    for command in (work, balance, slots, roulette, blackjack, leaderboard):
+    for command in (work, balance, slots, roulette, blackjack, bet, mybets, leaderboard):
         command.error(economy_error)
 
     @client.hybrid_command(name="help", description="Lists every command DJ Shinx offers")
@@ -1055,6 +1113,34 @@ def run_discord_bot():
 
         await _broadcast('steam_sales', send)
 
+    @tasks.loop(minutes=5.0)
+    async def sports_bet_results():
+        # Pings each bettor in the channel they bet from, not a /setchannel
+        # destination -- a bet result is personal. The coins are already
+        # paid by the time this posts, so a send that fails only loses
+        # the message.
+        try:
+            settlements = await asyncio.to_thread(sportsbook.settle_finished_bets)
+        except Exception as e:
+            # Escaping here would stop the loop for good, leaving every
+            # later bet unsettled until a restart.
+            logger.exception(f"sportsbook: settling bets failed: {e}")
+            return
+
+        for settlement in settlements:
+            try:
+                channel = client.get_channel(settlement.channel_id) or await client.fetch_channel(settlement.channel_id)
+                await channel.send(
+                    content=f"<@{settlement.user_id}>",
+                    embed=_embed(f"🎟️ **Bet settled**\n{settlement.text}"),
+                    allowed_mentions=discord.AllowedMentions(users=True),
+                )
+            except discord.HTTPException as e:
+                logger.warning(
+                    f"sportsbook: couldn't post a bet result for user {settlement.user_id} "
+                    f"in channel {settlement.channel_id}: {e}"
+                )
+
     async def _post_update_log():
         """Drops a short changelog in the maintainer channel when the bot
         comes back up on new code. Sends straight to one hardcoded channel
@@ -1091,6 +1177,7 @@ def run_discord_bot():
         game_reminders.start()
         game_recaps.start()
         steam_sale_alerts.start()
+        sports_bet_results.start()
         logger.info(f'{client.user} is now running!')
         await client.tree.sync()
         await _post_update_log()

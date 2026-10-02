@@ -13,6 +13,7 @@ roulette about 102%, blackjack about 101% with sensible play. Still a
 gamble -- any one bet is more likely to lose than to win big -- but
 someone who keeps playing tends to come out a little ahead.
 """
+import contextlib
 import datetime
 import math
 import os
@@ -44,7 +45,9 @@ WORK_JOBS = [
 ]
 
 
-def _connect() -> sqlite3.Connection:
+def connect() -> sqlite3.Connection:
+    """Opens the economy database. Shared with sportsbook.py, which keeps
+    its bets in here too so they can share transactions with wallets."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS wallets ("
@@ -85,7 +88,7 @@ def outcome_line(bet: int, returned: int, balance: int) -> str:
 #=========================--WALLETS--========================================#
 
 def get_balance(guild_id, user_id) -> int:
-    with _connect() as conn:
+    with connect() as conn:
         row = conn.execute(
             "SELECT balance FROM wallets WHERE guild_id = ? AND user_id = ?",
             (str(guild_id), str(user_id)),
@@ -101,7 +104,7 @@ def work(guild_id, user_id) -> tuple[int, int] | None:
     both pay out."""
     earned = random.randint(WORK_MIN, WORK_MAX)
     today = datetime.datetime.now(EASTERN).date().isoformat()
-    with _connect() as conn:
+    with connect() as conn:
         cursor = conn.execute(
             "INSERT INTO wallets (guild_id, user_id, balance, last_work) VALUES (?, ?, ?, ?) "
             "ON CONFLICT (guild_id, user_id) DO UPDATE SET "
@@ -122,12 +125,20 @@ def time_until_work_resets() -> datetime.timedelta:
     return tomorrow - now
 
 
-def take_bet(guild_id, user_id, amount: int) -> bool:
+def _transaction(conn: sqlite3.Connection | None):
+    """The caller's transaction when it passes one in, so a wallet change
+    can commit or roll back together with its other writes (sportsbook.py
+    records a bet in the same breath as taking its stake); otherwise a
+    transaction of its own."""
+    return contextlib.nullcontext(conn) if conn is not None else connect()
+
+
+def take_bet(guild_id, user_id, amount: int, conn: sqlite3.Connection | None = None) -> bool:
     """Removes a bet from the user's balance. Returns False, taking
     nothing, if they can't cover it. The balance check is part of the
     UPDATE itself, so rapid-fire bets can't spend the same coins twice."""
-    with _connect() as conn:
-        cursor = conn.execute(
+    with _transaction(conn) as c:
+        cursor = c.execute(
             "UPDATE wallets SET balance = balance - ? "
             "WHERE guild_id = ? AND user_id = ? AND balance >= ?",
             (amount, str(guild_id), str(user_id), amount),
@@ -135,21 +146,24 @@ def take_bet(guild_id, user_id, amount: int) -> bool:
         return cursor.rowcount == 1
 
 
-def pay(guild_id, user_id, amount: int) -> int:
+def pay(guild_id, user_id, amount: int, conn: sqlite3.Connection | None = None) -> int:
     """Adds coins to the user's balance and returns the new balance."""
-    with _connect() as conn:
-        conn.execute(
+    with _transaction(conn) as c:
+        c.execute(
             "INSERT INTO wallets (guild_id, user_id, balance) VALUES (?, ?, ?) "
             "ON CONFLICT (guild_id, user_id) DO UPDATE SET balance = balance + excluded.balance",
             (str(guild_id), str(user_id), amount),
         )
-    return get_balance(guild_id, user_id)
+        return c.execute(
+            "SELECT balance FROM wallets WHERE guild_id = ? AND user_id = ?",
+            (str(guild_id), str(user_id)),
+        ).fetchone()[0]
 
 
 def leaderboard(guild_id, limit: int = 10) -> list[tuple[int, int]]:
     """Returns [(user_id, balance)] for this server's richest users,
     richest first. Anyone sitting at zero is left out."""
-    with _connect() as conn:
+    with connect() as conn:
         rows = conn.execute(
             "SELECT user_id, balance FROM wallets WHERE guild_id = ? AND balance > 0 "
             "ORDER BY balance DESC LIMIT ?",
