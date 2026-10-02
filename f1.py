@@ -6,7 +6,6 @@ import logging
 import datetime
 import threading
 import concurrent.futures
-from dataclasses import dataclass
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -349,36 +348,29 @@ def _session_label(competition: dict) -> str:
     return SESSION_LABELS.get(abbrev, abbrev)
 
 
-@dataclass
-class Post:
-    """One F1 announcement. A session's results board names that session
-    in `board`, so a later Post for the same board with edit=True replaces
-    it in place -- as the times fill in, or the order changes -- rather
-    than posting the whole table again."""
-    text: str
-    board: str | None = None
-    edit: bool = False
-
-
-def _board_key(competition: dict) -> str:
-    return f"f1:{competition['id']}"
-
-
-def _results_message(event: dict, competition: dict, results: list[tuple[str, str, str, str]]) -> str:
-    text = f"## {_session_label(competition)} Results — {event['name']}\n{_results_table(results)}"
+def _results_message(
+    event: dict, competition: dict, results: list[tuple[str, str, str, str]], changed: list[str] | None = None,
+) -> str:
+    """A session's timings list. `changed` makes it a repost, saying what's
+    different from the list posted before it."""
+    heading = f"## {_session_label(competition)} Results — {event['name']}"
+    if changed is not None:
+        heading = "\n".join([f"{heading} (updated)", *changed])
+    text = f"{heading}\n{_results_table(results)}"
     completed = competition.get('status', {}).get('type', {}).get('completed', False)
     if not completed and any(time == NO_TIME for _, _, time, _ in results):
-        text += "\n*⏱️ Times are still coming in — this board updates itself when they land.*"
+        text += "\n*⏱️ Times are still coming in — I'll post the list again when they land.*"
     return text
 
 
 # ESPN marks a session "End of Session" as soon as it's over and the
 # classification is in, but only flips it to final (completed) once it's
 # official -- for a practice session that was well over half an hour
-# later, and the lap times only arrived with it. The board goes out at
-# whichever comes first and is edited in place every poll after that
-# until the session's final: as times land, and if stewards' penalties
-# reorder a qualifying session or a race after the flag.
+# later, and the lap times only arrived with it. The list goes out at
+# whichever comes first and is checked every poll after that until the
+# session's final; any change -- times landing, or stewards' penalties
+# reordering a qualifying session or a race after the flag -- gets the
+# whole list posted again.
 _SESSION_ENDED_STATUSES = {'STATUS_SESSION_COMPLETE', 'STATUS_FINAL'}
 
 
@@ -387,12 +379,20 @@ def _session_ended(competition: dict) -> bool:
     return bool(status.get('completed')) or status.get('name') in _SESSION_ENDED_STATUSES
 
 
-def _classification_changes(shown: list, latest: list) -> list[str]:
+def _what_changed(shown: list, latest: list) -> list[str]:
+    """For a reposted list: who moved since the last one, one line per
+    driver -- or, if nobody did, whether it's the times that are new."""
+    lines = _position_changes(shown, latest)
+    if lines:
+        return ["The order changed since the last list:", *lines]
+    if any(row[2] == NO_TIME for row in shown):
+        return ["⏱️ The times are in."]
+    return ["⏱️ The times have been updated."]
+
+
+def _position_changes(shown: list, latest: list) -> list[str]:
     """One line per driver whose position in the latest classification
-    isn't the one the board showed. Positions only: times filling in or
-    being restated are just edited into the board, but someone moving --
-    a penalty, say -- is worth a message of its own, since an edit to an
-    earlier post is easy to miss."""
+    isn't the one last posted."""
     before = {athlete_id: (place, name) for place, name, _, athlete_id in shown}
     lines = []
     for place, name, _, athlete_id in latest:
@@ -406,12 +406,12 @@ def _classification_changes(shown: list, latest: list) -> list[str]:
     return lines
 
 
-def check_f1_updates() -> list[Post]:
+def check_f1_updates() -> list[str]:
     """Checks the current F1 race weekend for new milestones -- race week
-    start, each session's results once it finishes, and qualifying/race
-    day -- and returns the posts to make, including edits to results
-    boards already posted. Persists state to disk (keyed by event +
-    session id) so nothing gets announced twice across restarts or
+    start, each session's results once it finishes (and again whenever they
+    change before going final), and qualifying/race day -- and returns a
+    list of message strings to post. Persists state to disk (keyed by
+    event + session id) so nothing gets announced twice across restarts or
     repeated polls."""
     try:
         event = _current_event()
@@ -428,7 +428,7 @@ def check_f1_updates() -> list[Post]:
         state = {'event_id': event_id, 'done': []}
 
     done = state['done']
-    posts = []
+    messages = []
     today = datetime.datetime.now(EASTERN).date()
 
     weekend_start = datetime.datetime.fromisoformat(event['date'].replace('Z', '+00:00')).astimezone(EASTERN).date()
@@ -438,15 +438,15 @@ def check_f1_updates() -> list[Post]:
         )
         headline = "IT'S RACE WEEK + SPRINT!!!" if is_sprint_weekend else "IT'S RACE WEEK!!"
         location = _event_location(event_id) or "location TBD"
-        posts.append(Post(f"# {headline} 🏎️🏁\n**{event['name']}**\nWhere: {location}"))
+        messages.append(f"# {headline} 🏎️🏁\n**{event['name']}**\nWhere: {location}")
         done.append('race_week')
 
     competitions = sorted(event.get('competitions', []), key=lambda c: c['date'])
 
-    # What each results board shows, for sessions not final yet: {session
-    # id: [[place, driver, time, athlete id], ...]}. ESPN's classification
-    # is checked against it every poll, and the board edited when they
-    # differ. (Earlier versions kept the same rows as 'first_results'.)
+    # The list last posted for each session not yet final: {session id:
+    # [[place, driver, time, athlete id], ...]}. ESPN's classification is
+    # checked against it every poll, and the list posted again whenever
+    # they differ. (Earlier versions kept the same rows as 'first_results'.)
     boards = state.setdefault('boards', state.pop('first_results', {}))
 
     for competition in competitions:
@@ -459,11 +459,11 @@ def check_f1_updates() -> list[Post]:
         day_marker = f"day:{comp_id}"
         if abbrev in QUALI_DAY_BANNERS and day_marker not in done and today == comp_date.date():
             banner = QUALI_DAY_BANNERS[abbrev]
-            posts.append(Post(f"# IT'S {banner} DAY!! ⏱️🏎️\n**{label}** for the {event['name']}"))
+            messages.append(f"# IT'S {banner} DAY!! ⏱️🏎️\n**{label}** for the {event['name']}")
             done.append(day_marker)
 
         if abbrev in RACE_DAY_BANNERS and day_marker not in done and today == comp_date.date():
-            posts.append(Post(_race_day_message(event, competitions, abbrev)))
+            messages.append(_race_day_message(event, competitions, abbrev))
             done.append(day_marker)
 
         results_marker = f"results:{comp_id}"
@@ -471,7 +471,7 @@ def check_f1_updates() -> list[Post]:
         if _session_ended(competition) and results_marker not in done:
             results = _session_results(event_id, competition)
             if results:
-                posts.append(Post(_results_message(event, competition, results), board=_board_key(competition)))
+                messages.append(_results_message(event, competition, results))
                 done.append(results_marker)
                 if completed:
                     done.append(final_marker)  # what was posted already is the final classification
@@ -480,7 +480,7 @@ def check_f1_updates() -> list[Post]:
         elif results_marker in done and final_marker not in done:
             shown = boards.get(comp_id)
             if shown is None:
-                # Posted before boards were kept, so there's nothing to
+                # Posted before lists were kept, so there's nothing to
                 # check ESPN's classification against.
                 done.append(final_marker)
                 continue
@@ -489,26 +489,17 @@ def check_f1_updates() -> list[Post]:
                 continue  # a transient hiccup; checked again next poll
             latest = [list(result) for result in results]
             if latest != shown:
-                posts.append(Post(
-                    _results_message(event, competition, results), board=_board_key(competition), edit=True,
-                ))
-                changes = _classification_changes(shown, latest)
-                if changes:
-                    posts.append(Post(
-                        f"📝 **{label} results updated** — {event['name']}\n"
-                        f"The order changed since they were first posted (the board above now has it):\n"
-                        + "\n".join(changes)
-                    ))
+                messages.append(_results_message(event, competition, results, _what_changed(shown, latest)))
                 boards[comp_id] = latest
             if completed:
                 done.append(final_marker)
                 del boards[comp_id]
 
     _save_state(state)
-    return posts
+    return messages
 
 
-def race_day_catch_up() -> list[Post]:
+def race_day_catch_up() -> list[str]:
     """What a server that's only just started getting F1 updates -- the
     bot newly added there, or the feature newly set up -- has missed today,
     if today is a race day: the race-day banner with the grid, or once the
@@ -528,7 +519,7 @@ def race_day_catch_up() -> list[Post]:
         today = datetime.datetime.now(EASTERN).date()
         competitions = sorted(event.get('competitions', []), key=lambda c: c['date'])
 
-        posts = []
+        messages = []
         for competition in competitions:
             abbrev = competition['type']['abbreviation']
             race_date = datetime.datetime.fromisoformat(competition['date'].replace('Z', '+00:00')).astimezone(EASTERN).date()
@@ -537,14 +528,10 @@ def race_day_catch_up() -> list[Post]:
             if f"results:{competition['id']}" in done:
                 results = _session_results(event['id'], competition)
                 if results:
-                    # A board like everyone else's, so it's edited along
-                    # with theirs if the classification still changes.
-                    posts.append(Post(
-                        _results_message(event, competition, results), board=_board_key(competition),
-                    ))
+                    messages.append(_results_message(event, competition, results))
             elif f"day:{competition['id']}" in done:
-                posts.append(Post(_race_day_message(event, competitions, abbrev)))
-        return posts
+                messages.append(_race_day_message(event, competitions, abbrev))
+        return messages
     except Exception as e:
         logger.warning(f"race_day_catch_up failed: {e}")
         return []

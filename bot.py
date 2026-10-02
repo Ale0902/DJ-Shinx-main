@@ -412,25 +412,6 @@ def _announcement_status(guild_id: int, client: discord.Client) -> str:
 _f1_caught_up: set[tuple[int, datetime.date]] = set()
 
 
-async def _post_f1(channel, post: f1.Post) -> None:
-    """Sends one F1 post into a channel. A results board is remembered, so
-    a later edit of it -- times filling in, the order changing -- changes
-    that message in place instead of posting the table again. An edit for a
-    board this channel never got, or whose message has since been deleted,
-    is posted fresh, so the channel still ends up with the latest one."""
-    if post.edit:
-        message_id = channel_config.get_post(post.board, channel.id)
-        if message_id is not None:
-            try:
-                await channel.get_partial_message(message_id).edit(embed=_embed(post.text))
-                return
-            except discord.NotFound:
-                pass
-    message = await channel.send(embed=_embed(post.text))
-    if post.board:
-        channel_config.remember_post(post.board, channel.id, message.id)
-
-
 async def _f1_race_day_catch_up(client: discord.Client, guild_id: int) -> None:
     """Posts today's F1 race-day announcement in a server that's only just
     started getting F1 updates -- the bot newly added, or the feature newly
@@ -440,14 +421,14 @@ async def _f1_race_day_catch_up(client: discord.Client, guild_id: int) -> None:
     channel_id = channel_config.get_channel(guild_id, 'f1_updates')
     if channel_id is None or key in _f1_caught_up:
         return
-    posts = await asyncio.to_thread(f1.race_day_catch_up)
-    if not posts:
+    messages = await asyncio.to_thread(f1.race_day_catch_up)
+    if not messages:
         return
     _f1_caught_up.add(key)  # before the first await, so two triggers at once can't both post
     try:
         channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
-        for post in posts:
-            await _post_f1(channel, post)
+        for message in messages:
+            await channel.send(embed=_embed(message))
     except Exception as e:
         _f1_caught_up.discard(key)
         logger.warning(f"f1: couldn't post today's race day in guild {guild_id}: {e}")
@@ -1586,13 +1567,13 @@ def run_discord_bot():
     @tasks.loop(minutes=15.0)
     @_keep_alive
     async def f1_updates():
-        posts = await asyncio.to_thread(f1.check_f1_updates)
-        if not posts:
+        messages = await asyncio.to_thread(f1.check_f1_updates)
+        if not messages:
             return
 
         async def send(channel):
-            for post in posts:
-                await _post_f1(channel, post)
+            for message in messages:
+                await channel.send(embed=_embed(message))
 
         await _broadcast('f1_updates', send)
 

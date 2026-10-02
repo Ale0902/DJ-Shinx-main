@@ -32,37 +32,7 @@ def _connect() -> sqlite3.Connection:
         "channel_id TEXT NOT NULL, "
         "PRIMARY KEY (guild_id, feature))"
     )
-    # Which message an announcement went out as in each channel, for one
-    # that's edited in place later -- like an F1 results board filling in
-    # its times. Kept here rather than in memory so a restart between the
-    # post and its edit doesn't post the whole thing again.
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS posts ("
-        "post_key TEXT NOT NULL, "
-        "channel_id TEXT NOT NULL, "
-        "message_id TEXT NOT NULL, "
-        "PRIMARY KEY (post_key, channel_id))"
-    )
     return conn
-
-
-def remember_post(post_key: str, channel_id, message_id) -> None:
-    with _connect() as conn:
-        conn.execute(
-            "INSERT INTO posts (post_key, channel_id, message_id) VALUES (?, ?, ?) "
-            "ON CONFLICT (post_key, channel_id) DO UPDATE SET message_id = excluded.message_id",
-            (post_key, str(channel_id), str(message_id)),
-        )
-
-
-def get_post(post_key: str, channel_id) -> int | None:
-    """The message an announcement went out as in this channel, or None."""
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT message_id FROM posts WHERE post_key = ? AND channel_id = ?",
-            (post_key, str(channel_id)),
-        ).fetchone()
-    return int(row[0]) if row else None
 
 
 def set_channel(guild_id, feature: str, channel_id) -> None:
