@@ -1,5 +1,5 @@
-"""A play-money economy for each server: /work pays a flat amount once a
-day, and slots, roulette and blackjack let people bet it to try to grow
+"""A play-money economy for each server: /work pays a random amount once
+a day, and slots, roulette and blackjack let people bet it to try to grow
 it. Coins are worth nothing outside the bot and can't be bought.
 
 Every server has its own separate economy -- balances are keyed by
@@ -7,10 +7,11 @@ Every server has its own separate economy -- balances are keyed by
 being rich in one server means nothing in another. Stored in a local
 SQLite file, same pattern as memory_db.py and channel_config.py.
 
-The games keep a modest house edge, like the real thing: slots pays back
-about 98% on average, roulette (single zero) 97.3%, blackjack about 99.3%
-with decent play. Gambling is how someone gets lucky and pulls ahead, not
-a reliable way to beat /work.
+The games lean slightly in the players' favor, so a server's economy can
+slowly grow rather than drain: slots pays back about 102% on average,
+roulette about 102%, blackjack about 101% with sensible play. Still a
+gamble -- any one bet is more likely to lose than to win big -- but
+someone who keeps playing tends to come out a little ahead.
 """
 import datetime
 import math
@@ -26,9 +27,11 @@ DB_PATH = os.path.join(BASE, 'economy.db')
 EASTERN = ZoneInfo("America/New_York")
 
 COIN = "🪙"
-WORK_PAYOUT = 500
+# /work pays a random amount in this range, inclusive.
+WORK_MIN = 200
+WORK_MAX = 700
 
-# Flavor text for /work -- the payout is always WORK_PAYOUT regardless.
+# Flavor text for /work -- unrelated to how much it pays.
 WORK_JOBS = [
     "DJ'd a wedding reception",
     "walked the neighbor's Shinx",
@@ -90,11 +93,13 @@ def get_balance(guild_id, user_id) -> int:
     return row[0] if row else 0
 
 
-def work(guild_id, user_id) -> int | None:
-    """Pays WORK_PAYOUT if this user hasn't worked yet today (Eastern
-    time) in this server. Returns the new balance, or None if they
-    already have. A single statement does both the check and the
-    payment, so two /work calls landing at once can't both pay out."""
+def work(guild_id, user_id) -> tuple[int, int] | None:
+    """Pays between WORK_MIN and WORK_MAX coins if this user hasn't worked
+    yet today (Eastern time) in this server. Returns (amount earned, new
+    balance), or None if they already have. A single statement does both
+    the check and the payment, so two /work calls landing at once can't
+    both pay out."""
+    earned = random.randint(WORK_MIN, WORK_MAX)
     today = datetime.datetime.now(EASTERN).date().isoformat()
     with _connect() as conn:
         cursor = conn.execute(
@@ -102,11 +107,11 @@ def work(guild_id, user_id) -> int | None:
             "ON CONFLICT (guild_id, user_id) DO UPDATE SET "
             "balance = balance + excluded.balance, last_work = excluded.last_work "
             "WHERE wallets.last_work IS NULL OR wallets.last_work != excluded.last_work",
-            (str(guild_id), str(user_id), WORK_PAYOUT, today),
+            (str(guild_id), str(user_id), earned, today),
         )
         if cursor.rowcount == 0:
             return None
-    return get_balance(guild_id, user_id)
+    return earned, get_balance(guild_id, user_id)
 
 
 def time_until_work_resets() -> datetime.timedelta:
@@ -157,15 +162,15 @@ def leaderboard(guild_id, limit: int = 10) -> list[tuple[int, int]]:
 
 # symbol -> (weight on each reel, three-of-a-kind payout, two-of-a-kind payout).
 # Payouts are total returns as a multiple of the bet, so 1 means "your bet
-# back" and 0 means it's lost. Tuned for ~98% payback, with about half of
+# back" and 0 means it's lost. Tuned for ~102% payback, with about half of
 # all spins returning at least the bet -- see the module docstring.
 SLOT_SYMBOLS = {
-    "🍒": (7, 4, 1),
-    "🍋": (6, 6, 1),
+    "🍒": (7, 5, 1),
+    "🍋": (6, 7, 1),
     "🍇": (5, 10, 1),
     "🔔": (4, 25, 2),
     "⭐": (2, 60, 2),
-    "7️⃣": (1, 300, 3),
+    "7️⃣": (1, 400, 3),
 }
 SLOT_HIDDEN = "❔"
 
@@ -197,7 +202,9 @@ def slots_paytable() -> str:
 
 #=========================--ROULETTE--=======================================#
 
-# European wheel: a single green 0, so the house edge is 1/37 on every bet.
+# European wheel: a single green 0. At standard payouts (2x / 3x / 36x)
+# that zero gives the house a 2.7% edge on every bet, so payouts here run
+# 5% higher instead, tipping every bet to about 102% in the player's favor.
 RED_NUMBERS = frozenset({1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36})
 
 
@@ -205,44 +212,59 @@ RED_NUMBERS = frozenset({1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 
 class RouletteBet:
     label: str
     numbers: frozenset
-    multiplier: int  # total return as a multiple of the bet
+    payout_pct: int  # total return as a percentage of the bet: 210 means 2.1x
+
+    def returned(self, bet: int) -> int:
+        """Coins paid back on a win, stake included. Whole percentages
+        keep this in integer math -- 10 * 3.15 in floats is 31.4999..."""
+        return bet * self.payout_pct // 100
 
 
 def _range(low, high):
     return frozenset(range(low, high + 1))
 
 
+def format_multiplier(payout_pct: int) -> str:
+    return f"{payout_pct / 100:g}×"  # 210 -> "2.1×", 3800 -> "38×"
+
+
+EVEN_MONEY_PCT = 210  # red/black, odd/even, low/high
+DOZEN_PCT = 315
+NUMBER_PCT = 3800  # a single number, including green 0
+
+
 # name -> bet, for every outside bet. Aliases share one RouletteBet.
-_RED = RouletteBet("Red", RED_NUMBERS, 2)
-_BLACK = RouletteBet("Black", _range(1, 36) - RED_NUMBERS, 2)
-_ODD = RouletteBet("Odd", frozenset(range(1, 37, 2)), 2)
-_EVEN = RouletteBet("Even", frozenset(range(2, 37, 2)), 2)
-_LOW = RouletteBet("Low (1-18)", _range(1, 18), 2)
-_HIGH = RouletteBet("High (19-36)", _range(19, 36), 2)
-_DOZEN_1 = RouletteBet("1st dozen (1-12)", _range(1, 12), 3)
-_DOZEN_2 = RouletteBet("2nd dozen (13-24)", _range(13, 24), 3)
-_DOZEN_3 = RouletteBet("3rd dozen (25-36)", _range(25, 36), 3)
+_RED = RouletteBet("Red", RED_NUMBERS, EVEN_MONEY_PCT)
+_BLACK = RouletteBet("Black", _range(1, 36) - RED_NUMBERS, EVEN_MONEY_PCT)
+_ODD = RouletteBet("Odd", frozenset(range(1, 37, 2)), EVEN_MONEY_PCT)
+_EVEN = RouletteBet("Even", frozenset(range(2, 37, 2)), EVEN_MONEY_PCT)
+_LOW = RouletteBet("Low (1-18)", _range(1, 18), EVEN_MONEY_PCT)
+_HIGH = RouletteBet("High (19-36)", _range(19, 36), EVEN_MONEY_PCT)
+_DOZEN_1 = RouletteBet("1st dozen (1-12)", _range(1, 12), DOZEN_PCT)
+_DOZEN_2 = RouletteBet("2nd dozen (13-24)", _range(13, 24), DOZEN_PCT)
+_DOZEN_3 = RouletteBet("3rd dozen (25-36)", _range(25, 36), DOZEN_PCT)
 ROULETTE_BETS = {
     'red': _RED, 'black': _BLACK,
     'odd': _ODD, 'even': _EVEN,
     'low': _LOW, '1-18': _LOW,
     'high': _HIGH, '19-36': _HIGH,
     '1-12': _DOZEN_1, '13-24': _DOZEN_2, '25-36': _DOZEN_3,
-    'green': RouletteBet("Green (0)", frozenset({0}), 36),
+    'green': RouletteBet("Green (0)", frozenset({0}), NUMBER_PCT),
 }
 
-# What /roulette's autocomplete offers, in this order: (shown text, value).
+# What /roulette's autocomplete offers, in this order: (shown name, value).
+# The "pays N×" part is added from the bet itself, so it can't go stale.
 ROULETTE_SUGGESTIONS = [
-    ("Red — pays 2×", 'red'),
-    ("Black — pays 2×", 'black'),
-    ("Odd — pays 2×", 'odd'),
-    ("Even — pays 2×", 'even'),
-    ("Low, 1-18 — pays 2×", '1-18'),
-    ("High, 19-36 — pays 2×", '19-36'),
-    ("1st dozen, 1-12 — pays 3×", '1-12'),
-    ("2nd dozen, 13-24 — pays 3×", '13-24'),
-    ("3rd dozen, 25-36 — pays 3×", '25-36'),
-    ("Green 0 — pays 36×", 'green'),
+    ("Red", 'red'),
+    ("Black", 'black'),
+    ("Odd", 'odd'),
+    ("Even", 'even'),
+    ("Low, 1-18", '1-18'),
+    ("High, 19-36", '19-36'),
+    ("1st dozen, 1-12", '1-12'),
+    ("2nd dozen, 13-24", '13-24'),
+    ("3rd dozen, 25-36", '25-36'),
+    ("Green 0", 'green'),
 ]
 
 
@@ -254,20 +276,20 @@ def parse_roulette_bet(text: str) -> RouletteBet | None:
         return ROULETTE_BETS[text]
     if text.isdecimal() and 0 <= int(text) <= 36:
         number = int(text)
-        return RouletteBet(f"Number {number}", frozenset({number}), 36)
+        return RouletteBet(f"Number {number}", frozenset({number}), NUMBER_PCT)
     return None
 
 
 def roulette_suggestions(current: str) -> list[tuple[str, str]]:
     current = current.strip().lower()
-    # Matched against the bet's name only -- not its payout, or typing "36" offers green.
     matches = [
-        (name, value) for name, value in ROULETTE_SUGGESTIONS
-        if current in name.split(" — ")[0].lower() or current in value
+        (f"{name} — pays {format_multiplier(ROULETTE_BETS[value].payout_pct)}", value)
+        for name, value in ROULETTE_SUGGESTIONS
+        if current in name.lower() or current in value
     ]
     if current.isdecimal() and 0 <= int(current) <= 36:
         # Typing "1" could mean the number or the start of "1-12"/"1-18".
-        matches.insert(0, (f"Number {int(current)} — pays 36×", current))
+        matches.insert(0, (f"Number {int(current)} — pays {format_multiplier(NUMBER_PCT)}", current))
     return matches
 
 
@@ -313,8 +335,9 @@ def hand_value(cards: list[str]) -> tuple[int, bool]:
 
 class BlackjackGame:
     """One hand of blackjack against the dealer, dealt from a freshly
-    shuffled deck. Dealer stands on every 17, blackjack pays 3:2, and the
-    player can double down on their first two cards. No splitting.
+    shuffled deck. Dealer stands on every 17, blackjack pays 2:1 (instead
+    of the usual 3:2 -- that's what tips it into the player's favor), and
+    the player can double down on their first two cards. No splitting.
 
     Holds no money itself: the caller takes the bet before dealing, takes
     a second bet before double_down(), and pays out payout() once
@@ -378,7 +401,7 @@ class BlackjackGame:
     def payout(self) -> int:
         """Total coins returned to the player, including their stake."""
         if self.outcome == 'blackjack':
-            return self.bet + self.bet * 3 // 2
+            return self.bet * 3
         if self.outcome in ('win', 'dealer_bust'):
             return self.bet * 2
         if self.outcome == 'push':
@@ -403,7 +426,7 @@ class BlackjackGame:
 
     def result_line(self) -> str:
         return {
-            'blackjack': "🃏 **Blackjack!** Pays 3:2.",
+            'blackjack': "🃏 **Blackjack!** Pays 2:1.",
             'win': "✅ **You win!**",
             'dealer_bust': "💥 **Dealer busts — you win!**",
             'push': "🤝 **Push.** Your bet comes back.",

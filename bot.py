@@ -372,7 +372,8 @@ async def _take_bet(ctx: commands.Context, bet: int) -> bool:
     await ctx.send(
         embed=_embed(
             f"You only have {economy.format_coins(coins)} — not enough to bet "
-            f"{economy.format_coins(bet)}. /work pays {economy.format_coins(economy.WORK_PAYOUT)} once a day."
+            f"{economy.format_coins(bet)}. /work pays **{economy.WORK_MIN}–{economy.WORK_MAX}** "
+            f"{economy.COIN} once a day."
         ),
         ephemeral=True,
     )
@@ -766,17 +767,20 @@ def run_discord_bot():
     # Economy: play money per server (see economy.py). Every command is
     # guild_only because balances belong to a server, and a DM has none.
 
-    @client.hybrid_command(name="work", description=f"Earn {economy.WORK_PAYOUT} coins — once a day")
+    @client.hybrid_command(
+        name="work", description=f"Earn {economy.WORK_MIN}–{economy.WORK_MAX} coins — once a day"
+    )
     @commands.guild_only()
     async def work(ctx: commands.Context):
-        coins = economy.work(ctx.guild.id, ctx.author.id)
-        if coins is None:
+        result = economy.work(ctx.guild.id, ctx.author.id)
+        if result is None:
             wait = economy.format_duration(economy.time_until_work_resets())
             await ctx.send(embed=_embed(f"You've already worked today. Your next shift starts in **{wait}**."), ephemeral=True)
             return
+        earned, coins = result
         job = random.choice(economy.WORK_JOBS)
         await ctx.send(embed=_embed(
-            f"💼 You {job} and earned {economy.format_coins(economy.WORK_PAYOUT)}.\n"
+            f"💼 You {job} and earned {economy.format_coins(earned)}.\n"
             f"Balance: {economy.format_coins(coins)}"
         ))
 
@@ -841,7 +845,7 @@ def run_discord_bot():
         if not await _take_bet(ctx, bet):
             return
         number = economy.spin_roulette()
-        returned = bet * choice.multiplier if number in choice.numbers else 0
+        returned = choice.returned(bet) if number in choice.numbers else 0
         coins = economy.pay(ctx.guild.id, ctx.author.id, returned)
 
         header = (
