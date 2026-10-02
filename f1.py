@@ -9,6 +9,8 @@ import concurrent.futures
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+import sports
+
 logger = logging.getLogger(__name__)
 
 # ESPN's public (unofficial, no key needed) racing API. The "site" API gives
@@ -201,6 +203,10 @@ def _fetch_json(url: str, params: dict | None = None) -> Any:
     response.raise_for_status()
     data = response.json()
     _response_cache[key] = (now, data)
+    if len(_response_cache) > sports._CACHE_SWEEP_SIZE:
+        # Every driver's results are their own URL, so this grows with
+        # each race weekend unless it's swept.
+        sports._sweep_cache(_response_cache, now, _CACHE_TTL_SECONDS)
     return data
 
 

@@ -116,14 +116,23 @@ REANNOUNCE_AFTER_DAYS = 14
 
 def _load_state():
     if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, 'r') as f:
-            return json.load(f)
+        try:
+            with open(STATE_FILE, 'r') as f:
+                return json.load(f)
+        except (ValueError, OSError) as e:
+            # An unreadable file used to raise on every poll, which stops the
+            # bot's alert loop for good. Starting over just re-seeds a quiet
+            # baseline (see check_steam_sales).
+            logger.warning(f"steam_sales: unreadable state file, starting over: {e}")
     return {}
 
 
 def _save_state(state):
-    with open(STATE_FILE, 'w') as f:
+    # Temp file + rename, so a crash mid-write can't leave a truncated file.
+    tmp_path = STATE_FILE + '.tmp'
+    with open(tmp_path, 'w') as f:
         json.dump(state, f)
+    os.replace(tmp_path, STATE_FILE)
 
 
 # Steam's search endpoint answers with a blob of rendered HTML rather

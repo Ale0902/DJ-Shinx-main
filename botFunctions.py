@@ -20,9 +20,19 @@ ABSOLUTE_BATMAN_VOLUME_ID = '160294'
 
 
 def topsongs() -> str:
-    iTunes_Scrape.updateSongList()
-    with open(os.path.join(BASE, 'Top_Songs.csv'), 'r', encoding='utf-8') as csvfile:
-        top_five = list(csv.DictReader(csvfile))[:5]
+    try:
+        iTunes_Scrape.updateSongList()
+    except Exception as e:
+        # The chart site being slow or down shouldn't break the command --
+        # the last chart fetched is still worth showing.
+        logger.warning(f"topsongs: couldn't refresh the chart, showing the last one saved: {e}")
+    try:
+        with open(os.path.join(BASE, 'Top_Songs.csv'), 'r', encoding='utf-8') as csvfile:
+            top_five = list(csv.DictReader(csvfile))[:5]
+    except OSError:
+        top_five = []
+    if not top_five:
+        return "Couldn't reach the iTunes chart right now. Try again later!"
 
     lines = ["## The Top 5 Songs on iTunes Right Now!"]
     lines.extend(f"**Rank:** {row['Rank']}\n*{row['Song']}*, {row['Artist']}" for row in top_five)

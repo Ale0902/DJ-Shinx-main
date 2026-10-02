@@ -1,8 +1,10 @@
+import aiohttp
 import discord
 from discord.ext import commands, tasks
 import asyncio
 import contextlib
 import datetime
+import functools
 import io
 import logging
 import random
@@ -171,6 +173,41 @@ async def _send_announcement(destination, message: str, artwork_as_thumbnail: bo
         await destination.send(embed=embed, file=file)
     else:
         await destination.send(embed=embed)
+
+
+def _split_by_line(text: str, limit: int = MAX_EMBED_DESC) -> list[str]:
+    """Splits text into chunks of whole lines that each fit an embed
+    description -- for a list that can outgrow one embed, like a heavy
+    bettor's /mybets, which Discord would otherwise reject outright."""
+    chunks, current = [], ""
+    for line in text.split("\n"):
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit and current:
+            chunks.append(current)
+            candidate = line
+        current = candidate
+    chunks.append(current)
+    return chunks
+
+
+# What tasks.loop already retries by itself, after a back-off.
+_LOOP_RETRIED = (OSError, discord.GatewayNotFound, discord.ConnectionClosed, aiohttp.ClientError, asyncio.TimeoutError)
+
+
+def _keep_alive(body):
+    """For every tasks.loop body. Anything else a loop raises stops it for
+    good, so one bad poll -- a reshaped API response, a corrupt state file
+    -- would switch that feature off until the next restart. Logged
+    instead, and the loop runs again on schedule."""
+    @functools.wraps(body)
+    async def wrapper(*args, **kwargs):
+        try:
+            await body(*args, **kwargs)
+        except _LOOP_RETRIED:
+            raise
+        except Exception:
+            logger.exception(f"{body.__name__}: this run failed; it'll run again on schedule")
+    return wrapper
 
 # Commands that work normally but are left out of /help entirely -- easter
 # eggs that only show up if you already know about them.
@@ -468,6 +505,11 @@ class BlackjackView(discord.ui.View):
 
     @discord.ui.button(label="Double Down", style=discord.ButtonStyle.success)
     async def double_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Hit and Double Down clicked together are both queued, so by now a
+        # third card may be out -- and doubling is only on the first two.
+        if not self.game.can_double:
+            await interaction.response.defer()
+            return
         if not economy.take_bet(self.guild_id, self.author.id, self.original_bet):
             await interaction.response.send_message(
                 f"Doubling down costs another {economy.format_coins(self.original_bet)}, and you don't have it.",
@@ -1256,7 +1298,8 @@ def run_discord_bot():
                 "/propbet on an NFL player or defense, or /horsebet on a JRA race."
             ))
             return
-        await ctx.send(embed=_embed("🎟️ **Your open bets**\n" + "\n".join(texts)))
+        for chunk in _split_by_line("🎟️ **Your open bets**\n" + "\n".join(texts)):
+            await ctx.send(embed=_embed(chunk))
 
     async def economy_error(ctx: commands.Context, error: commands.CommandError):
         if isinstance(error, commands.NoPrivateMessage):
@@ -1333,13 +1376,19 @@ def run_discord_bot():
                     f"(guild {guild_id}) -- check the bot's Send Messages / Embed Links "
                     f"permissions there: {e}"
                 )
+            except Exception:
+                # Anything else is still this destination's problem, not
+                # every server's after it.
+                logger.exception(f"{feature}: failed to post in channel {channel_id} (guild {guild_id})")
 
     @tasks.loop(time=datetime.time(hour=13, minute=0, tzinfo=EASTERN))
+    @_keep_alive
     async def sotd():
         result = await asyncio.to_thread(bf.recsongs)
         await _broadcast('sotd', lambda channel: _send_announcement(channel, result, artwork_as_thumbnail=True))
 
     @tasks.loop(hours=6.0)
+    @_keep_alive
     async def new_chapter_announcements():
         berserk_announcement = await asyncio.to_thread(bf.check_berserk_release)
         batman_announcement = await asyncio.to_thread(bf.check_absolute_batman_release)
@@ -1355,6 +1404,7 @@ def run_discord_bot():
         await _broadcast('manga_comics', send)
 
     @tasks.loop(minutes=15.0)
+    @_keep_alive
     async def f1_updates():
         messages = await asyncio.to_thread(f1.check_f1_updates)
         if not messages:
@@ -1367,6 +1417,7 @@ def run_discord_bot():
         await _broadcast('f1_updates', send)
 
     @tasks.loop(minutes=5.0)
+    @_keep_alive
     async def jra_updates():
         # Every 5 minutes rather than F1's 15, so the "minutes to post"
         # alert lands close to half an hour before the off.
@@ -1381,6 +1432,7 @@ def run_discord_bot():
         await _broadcast('jra_updates', send)
 
     @tasks.loop(minutes=30.0)
+    @_keep_alive
     async def game_announcements():
         messages = await asyncio.to_thread(game_news.check_game_announcements)
         if not messages:
@@ -1393,6 +1445,7 @@ def run_discord_bot():
         await _broadcast('game_announcements', send)
 
     @tasks.loop(minutes=5.0)
+    @_keep_alive
     async def game_reminders():
         # Runs more often than the other game_news loops so a "30 minutes
         # before" reminder actually lands close to 30 minutes out, not
@@ -1410,6 +1463,7 @@ def run_discord_bot():
         await _broadcast('game_announcements', send)
 
     @tasks.loop(minutes=30.0)
+    @_keep_alive
     async def game_recaps():
         messages = await asyncio.to_thread(game_news.check_recaps)
         if not messages:
@@ -1422,6 +1476,7 @@ def run_discord_bot():
         await _broadcast('game_announcements', send)
 
     @tasks.loop(minutes=30.0)
+    @_keep_alive
     async def steam_sale_alerts():
         # Events first: a franchise or seasonal sale is the context for
         # whatever individual discounts follow it in the same batch.
@@ -1440,6 +1495,7 @@ def run_discord_bot():
         await _broadcast('steam_sales', send)
 
     @tasks.loop(minutes=5.0)
+    @_keep_alive
     async def nfl_prop_menus():
         # Rebuilds every game's /propbet menu in the background: building
         # one cold takes ESPN a few seconds, and Discord only gives an
@@ -1447,6 +1503,7 @@ def run_discord_bot():
         await asyncio.to_thread(nfl_props.warm_menus)
 
     @tasks.loop(minutes=5.0)
+    @_keep_alive
     async def sports_bet_results():
         # Pings each bettor in the channel they bet from, not a /setchannel
         # destination -- a bet result is personal. The coins are already
@@ -1505,16 +1562,17 @@ def run_discord_bot():
 
     @client.event
     async def on_ready():
-        sotd.start()
-        new_chapter_announcements.start()
-        f1_updates.start()
-        jra_updates.start()
-        game_announcements.start()
-        game_reminders.start()
-        game_recaps.start()
-        steam_sale_alerts.start()
-        sports_bet_results.start()
-        nfl_prop_menus.start()
+        # on_ready fires again whenever the gateway has to start a fresh
+        # session, and starting a loop that's already running raises --
+        # which aborted this handler on every reconnect after the first.
+        # A loop that has stopped is started again.
+        loops = (
+            sotd, new_chapter_announcements, f1_updates, jra_updates, game_announcements,
+            game_reminders, game_recaps, steam_sale_alerts, sports_bet_results, nfl_prop_menus,
+        )
+        for loop in loops:
+            if not loop.is_running():
+                loop.start()
         logger.info(f'{client.user} is now running!')
         await client.tree.sync()
         await _post_update_log()
@@ -1522,20 +1580,5 @@ def run_discord_bot():
     client.run(TOKEN)
 
 
-async def sendMessage(message, user_message, is_private):
-    try:
-        response = responses.getResponse(user_message)
-        await message.author.send(response) if is_private else await message.channel.send(response)
-    except Exception as e:
-        logger.exception(f"Failed to send response message: {e}")
-
-async def sendTopSongs(message):
-    songs, artist, rank = await asyncio.to_thread(bf.topsongs)
-    await message.channel.send("## The top 5 songs on iTunes right now!")
-    for i in range(5):
-        await message.channel.send('**Rank: **' + f'{rank[i]}' + '\n' + f'*"{songs[i]}"*' + ', ' + f'{artist[i]}')
-    await message.channel.send('Source: https://www.popvortex.com/music/charts/top-100-songs.php')
-
 if __name__ == '__main__':
     run_discord_bot()
-    bf.updateSongList()

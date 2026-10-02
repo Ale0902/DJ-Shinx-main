@@ -126,6 +126,10 @@ def _cached(key: tuple, ttl: float, fetch):
         return hit[1]
     value = fetch()
     _cache[key] = (now, value)
+    if len(_cache) > sports._CACHE_SWEEP_SIZE:
+        # Every week brings new game ids, and a game summary alone runs to
+        # hundreds of KB; nothing here is kept longer than the team stats.
+        sports._sweep_cache(_cache, now, _TEAM_STATS_TTL_SECONDS)
     return value
 
 

@@ -46,6 +46,16 @@ XBOX_WIRE_FEED_URL = 'https://news.xbox.com/en-us/feed/'
 # How long to keep checking for a post-show recap article before giving up.
 RECAP_SEARCH_DAYS = 5
 
+# A show sets off a run of articles naming it -- previews, a live blog,
+# reactions -- and every one of them matches its announce_re. While a show
+# with a known air time is coming up, or aired within this many days,
+# later matches are coverage of it rather than a new show: they're
+# recorded (so they're never looked at again) but not announced. A show
+# whose time couldn't be worked out holds nothing back, so a "confirmed
+# for tomorrow" article that follows an undated rumor still gets through,
+# reminders and all.
+SHOW_COVERAGE_DAYS = 3
+
 # Per source: which RSS feed to watch, the regex that identifies an
 # announcement article, the regex that identifies a later recap article
 # on that same feed, and the header text used in the announcement message.
@@ -201,10 +211,16 @@ def _check_source(event_type: str) -> str | None:
     except Exception:
         return None
 
-    match = next((p for p in posts if config['announce_re'].search(p[1])), None)
+    # A recap ("Every Announcement From Today's Nintendo Direct") names the
+    # show too, but it's the end of one, never the start of another.
+    match = next(
+        (p for p in posts if config['announce_re'].search(p[1]) and not config['recap_re'].search(p[1])),
+        None,
+    )
     if not match:
         return None
     guid, title, url, published, description = match
+    coverage_cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=SHOW_COVERAGE_DAYS)
 
     with _connect() as conn:
         is_first_ever = conn.execute(
@@ -215,8 +231,15 @@ def _check_source(event_type: str) -> str | None:
         ).fetchone()
         if already_seen:
             return None
+        # Only an announced show with a worked-out air time has one stored,
+        # in the same UTC ISO format as the cutoff, so this compares as text.
+        covering_show = conn.execute(
+            "SELECT 1 FROM events WHERE event_type = ? AND broadcast_time >= ?",
+            (event_type, coverage_cutoff.isoformat(timespec='seconds')),
+        ).fetchone()
+        quiet = is_first_ever or covering_show is not None
 
-        if is_first_ever:
+        if quiet:
             broadcast_time, display_time = None, _format_date(published)
         else:
             broadcast_time, display_time = _extract_broadcast_datetime(description, published)
@@ -228,13 +251,13 @@ def _check_source(event_type: str) -> str | None:
                 event_type, guid, title, url,
                 broadcast_time.isoformat() if broadcast_time else None,
                 display_time,
-                1 if is_first_ever else 0,
-                1 if is_first_ever else 0,
-                1 if is_first_ever else 0,
+                1 if quiet else 0,
+                1 if quiet else 0,
+                1 if quiet else 0,
             ),
         )
 
-    if is_first_ever:
+    if quiet:
         return None
 
     return f"🎮 **{config['header']} ({display_time})**\nRead more: {url}"
@@ -271,7 +294,13 @@ def due_reminders() -> list[dict]:
         for event_id, title, url, broadcast_time_text, display_time, day_before_sent, thirty_min_sent in rows:
             broadcast_time = datetime.datetime.fromisoformat(broadcast_time_text)
 
-            if not thirty_min_sent and now >= broadcast_time - datetime.timedelta(minutes=30):
+            if now >= broadcast_time:
+                # Already on, or over: the bot was down while these were
+                # due, and "airing in 30 minutes" would now be wrong.
+                conn.execute(
+                    "UPDATE events SET thirty_min_sent = 1, day_before_sent = 1 WHERE id = ?", (event_id,)
+                )
+            elif not thirty_min_sent and now >= broadcast_time - datetime.timedelta(minutes=30):
                 due.append({'kind': 'thirty_min', 'title': title, 'url': url, 'display_time': display_time})
                 conn.execute(
                     "UPDATE events SET thirty_min_sent = 1, day_before_sent = 1 WHERE id = ?", (event_id,)
@@ -317,7 +346,17 @@ def check_recaps() -> list[str]:
             except Exception:
                 feed_cache[event_type] = []
 
-        recap = next((p for p in feed_cache[event_type] if config['recap_re'].search(p[1])), None)
+        # Published since the show -- a recap still sitting in the feed from
+        # an earlier one isn't this show's. A day's slack covers feeds that
+        # date posts in their own time zone rather than UTC.
+        earliest = broadcast_time.date() - datetime.timedelta(days=1)
+        recap = next(
+            (
+                p for p in feed_cache[event_type]
+                if config['recap_re'].search(p[1]) and p[3] is not None and p[3] >= earliest
+            ),
+            None,
+        )
         if not recap:
             continue
 

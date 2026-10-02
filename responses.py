@@ -9,7 +9,7 @@ def rolld20():
     if dice == 20:
         return 'You rolled a natural 20!'
     else:
-        return f'you rolled a {dice}!'
+        return f'You rolled a {dice}!'
 
 def ping():
     return 'PONG!'

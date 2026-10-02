@@ -24,10 +24,12 @@ import sys
 import ast
 import uuid
 import math
+import socket
 import operator
 import datetime
+import ipaddress
 import requests
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlparse
 from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -47,6 +49,11 @@ mcp = MCPServer("dj-shinx-web")
 
 USER_AGENT = "DJ-Shinx-Bot/1.0 (+https://github.com/Ale0902/DJ-Shinx-main)"
 MAX_FETCH_CHARS = 4000
+# fetch_page reads at most this much of a page -- the text it returns is
+# capped at MAX_FETCH_CHARS anyway, and a link to a multi-GB file would
+# otherwise be pulled into memory whole.
+MAX_FETCH_BYTES = 2 * 1024 * 1024
+MAX_FETCH_REDIRECTS = 5
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 SEARXNG_URL = os.getenv('SEARXNG_URL', 'http://127.0.0.1:8080')
 WIKIPEDIA_SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/{}"
@@ -227,18 +234,61 @@ def image_search(query: str) -> str:
     return f"[Image results via {source}]\n\n" + "\n\n".join(lines)
 
 
+def _is_public_host(hostname: str) -> bool:
+    """Whether every address the hostname resolves to is on the public
+    internet -- not loopback, the LAN, link-local (cloud metadata lives at
+    169.254.169.254), or any other reserved range."""
+    try:
+        addresses = {info[4][0] for info in socket.getaddrinfo(hostname, None)}
+    except (socket.gaierror, UnicodeError):
+        return False
+    # An IPv6 address can carry a "%zone" suffix that ip_address rejects.
+    return bool(addresses) and all(ipaddress.ip_address(a.split('%')[0]).is_global for a in addresses)
+
+
+def _get_public_page(url: str) -> requests.Response:
+    """GETs url (streamed), following redirects by hand so every hop is
+    checked. Without this, anyone who can talk to /chat -- or any web
+    page the model reads, telling it to -- could have this machine fetch
+    and read back internal services: Ollama, SearXNG, the router, a cloud
+    metadata endpoint. Raises ValueError for a link that isn't public."""
+    for _ in range(MAX_FETCH_REDIRECTS + 1):
+        parsed = urlparse(url)
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+            raise ValueError("only http(s) links can be fetched")
+        if not _is_public_host(parsed.hostname):
+            raise ValueError("that address isn't on the public internet")
+        response = requests.get(
+            url, headers={"User-Agent": USER_AGENT}, timeout=10, stream=True, allow_redirects=False,
+        )
+        if not response.is_redirect:
+            return response
+        url = urljoin(url, response.headers['Location'])
+        response.close()
+    raise ValueError("too many redirects")
+
+
 @mcp.tool()
 def fetch_page(url: str) -> str:
     """Fetches a web page, such as one returned by web_search, and
     returns its readable text content, truncated to a few thousand
     characters."""
     try:
-        response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
-        response.raise_for_status()
+        with _get_public_page(url) as response:
+            response.raise_for_status()
+            body = b''
+            for chunk in response.iter_content(64 * 1024):
+                body += chunk
+                if len(body) >= MAX_FETCH_BYTES:
+                    break
+            # Only a charset the server actually declared -- requests
+            # assumes Latin-1 for any text/html that doesn't say, which
+            # would garble a UTF-8 page that names its charset in a <meta>.
+            declared = re.search(r'charset=([\w-]+)', response.headers.get('Content-Type', ''), re.IGNORECASE)
     except Exception as e:
         return f"Couldn't fetch {url}: {e}"
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    soup = BeautifulSoup(body, "html.parser", from_encoding=declared.group(1) if declared else None)
     for tag in soup(["script", "style", "nav", "footer", "header"]):
         tag.decompose()
 
@@ -613,10 +663,24 @@ def plot_data(query: str) -> str:
 # expression's AST and only permits numbers, basic operators, and a
 # whitelisted set of math functions/constants, rather than using eval()
 # (which would let an LLM-generated string run arbitrary Python).
+# Past this many digits a power isn't arithmetic anyone asked for -- and a
+# tower like 9**9**9 (369 million digits) would pin a CPU and eat memory
+# for as long as /chat waits, which is forever. Python won't turn an int
+# longer than this into text anyway (sys.get_int_max_str_digits()).
+MAX_POWER_DIGITS = sys.get_int_max_str_digits()
+
+
+def _power(base, exponent):
+    if isinstance(base, int) and isinstance(exponent, int) and abs(base) > 1 and exponent > 0:
+        if exponent * math.log10(abs(base)) > MAX_POWER_DIGITS:
+            raise ValueError(f"the result would run past {MAX_POWER_DIGITS:,} digits")
+    return operator.pow(base, exponent)
+
+
 _BINOPS = {
     ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
     ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv,
-    ast.Mod: operator.mod, ast.Pow: operator.pow,
+    ast.Mod: operator.mod, ast.Pow: _power,
 }
 _UNARYOPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 _FUNCS = {
@@ -651,10 +715,11 @@ def calculate(expression: str) -> str:
     calculation instead of doing the arithmetic yourself -- you're
     unreliable at multi-digit math."""
     try:
-        result = _safe_eval(ast.parse(expression, mode='eval'))
+        # str() inside the try: a product of big numbers can still be too
+        # long for Python to turn into text, and that raises too.
+        return str(_safe_eval(ast.parse(expression, mode='eval')))
     except Exception as e:
         return f"Couldn't evaluate '{expression}': {e}"
-    return str(result)
 
 
 if __name__ == "__main__":

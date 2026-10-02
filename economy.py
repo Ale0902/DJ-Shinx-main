@@ -27,6 +27,8 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE, 'economy.db')
 
 COIN = "🪙"
+# The largest number SQLite's INTEGER can hold.
+MAX_COINS = 2**63 - 1
 # /work pays a random amount in this range, inclusive.
 WORK_MIN = 200
 WORK_MAX = 700
@@ -205,6 +207,10 @@ def take_bet(guild_id, user_id, amount: int, conn: sqlite3.Connection | None = N
     """Removes a bet from the user's balance. Returns False, taking
     nothing, if they can't cover it. The balance check is part of the
     UPDATE itself, so rapid-fire bets can't spend the same coins twice."""
+    if amount > MAX_COINS:
+        # Nobody can cover it, and SQLite can't even store a number that
+        # big -- binding one raised OverflowError instead of saying no.
+        return False
     with _transaction(conn) as c:
         cursor = c.execute(
             "UPDATE wallets SET balance = balance - ? "

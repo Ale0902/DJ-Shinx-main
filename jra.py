@@ -23,6 +23,8 @@ from zoneinfo import ZoneInfo
 import requests
 from bs4 import BeautifulSoup
 
+import sports
+
 logger = logging.getLogger(__name__)
 
 RACE_LIST_URL = "https://race.netkeiba.com/top/race_list_sub.html"
@@ -114,6 +116,10 @@ def _fetch_text(url: str, params: dict, ttl: float) -> str:
     response.encoding = 'utf-8'
     text = response.text
     _response_cache[key] = (now, text)
+    if len(_response_cache) > sports._CACHE_SWEEP_SIZE:
+        # Keys are dates and race ids, so the cache would otherwise keep
+        # every page ever fetched; nothing here lives past the card's TTL.
+        sports._sweep_cache(_response_cache, now, _CARD_TTL_SECONDS)
     return text
 
 

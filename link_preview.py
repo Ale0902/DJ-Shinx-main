@@ -275,6 +275,12 @@ def shrink_artwork(image_url: str, size: int) -> bytes | None:
             logger.warning(f"link_preview: artwork {image_url} returned {response.status_code}")
             return None
         data = response.raw.read(MAX_IMAGE_BYTES + 1, decode_content=True)
+    except Exception as e:
+        # The body read is urllib3's, so a connection dropped mid-download
+        # raises its own exceptions, not requests' -- and this is meant to
+        # never raise, since a raise here takes the announcement down too.
+        logger.warning(f"link_preview: artwork {image_url} dropped mid-download: {e}")
+        return None
     finally:
         response.close()
     if len(data) > MAX_IMAGE_BYTES:

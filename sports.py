@@ -117,6 +117,19 @@ _executor = concurrent.futures.ThreadPoolExecutor(max_workers=32)
 # rate-limited. Live scores are only ever this many seconds stale.
 _CACHE_TTL_SECONDS = 15
 _response_cache: dict[tuple, tuple[float, Any]] = {}
+# Keys carry dates and event ids, so without a sweep a long-running bot
+# would hold on to every response it ever fetched -- a few MB a week of
+# scoreboards alone.
+_CACHE_SWEEP_SIZE = 256
+
+
+def _sweep_cache(cache: dict, now: float, max_age: float) -> None:
+    """Drops entries older than max_age. Safe alongside other threads using
+    the cache: it works from a snapshot, and a key another thread has
+    already replaced or removed is just skipped."""
+    for key, (stored_at, _) in list(cache.items()):
+        if now - stored_at >= max_age:
+            cache.pop(key, None)
 
 
 def _get_json(url: str, params: dict | None = None) -> Any:
@@ -132,6 +145,8 @@ def _get_json(url: str, params: dict | None = None) -> Any:
     response.raise_for_status()
     data = response.json()
     _response_cache[key] = (now, data)
+    if len(_response_cache) > _CACHE_SWEEP_SIZE:
+        _sweep_cache(_response_cache, now, _CACHE_TTL_SECONDS)
     return data
 
 
