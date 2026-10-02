@@ -1,5 +1,5 @@
-"""A play-money economy for each server: /work pays a random amount once
-a day, and slots, roulette and blackjack let people bet it to try to grow
+"""A play-money economy for each server: /work pays a random amount every
+two hours, and slots, roulette and blackjack let people bet it to try to grow
 it. Coins are worth nothing outside the bot and can't be bought.
 
 Every server has its own separate economy -- balances are keyed by
@@ -20,17 +20,16 @@ import os
 import random
 import sqlite3
 from dataclasses import dataclass
-from zoneinfo import ZoneInfo
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE, 'economy.db')
-
-EASTERN = ZoneInfo("America/New_York")
 
 COIN = "🪙"
 # /work pays a random amount in this range, inclusive.
 WORK_MIN = 200
 WORK_MAX = 700
+# How long after a /work shift until the next one pays.
+WORK_COOLDOWN_HOURS = 2
 
 # Flavor text for /work -- unrelated to how much it pays.
 WORK_JOBS = [
@@ -54,7 +53,7 @@ def connect() -> sqlite3.Connection:
         "guild_id TEXT NOT NULL, "
         "user_id TEXT NOT NULL, "
         "balance INTEGER NOT NULL DEFAULT 0, "
-        "last_work TEXT, "  # Eastern date of the last /work, e.g. '2026-10-01'
+        "last_work TEXT, "  # UTC time of the last /work, e.g. '2026-10-01T19:30:00+00:00'
         "PRIMARY KEY (guild_id, user_id))"
     )
     return conn
@@ -96,33 +95,47 @@ def get_balance(guild_id, user_id) -> int:
     return row[0] if row else 0
 
 
+def _work_timestamp(moment: datetime.datetime) -> str:
+    # Always the same UTC format, so two of these compare correctly as
+    # plain text inside SQL. A last_work saved back when /work was once a
+    # day is a bare date like '2026-10-01', which sorts before any of
+    # these and so reads as long enough ago.
+    return moment.astimezone(datetime.timezone.utc).isoformat(timespec='seconds')
+
+
 def work(guild_id, user_id) -> tuple[int, int] | None:
     """Pays between WORK_MIN and WORK_MAX coins if this user hasn't worked
-    yet today (Eastern time) in this server. Returns (amount earned, new
-    balance), or None if they already have. A single statement does both
-    the check and the payment, so two /work calls landing at once can't
-    both pay out."""
+    in this server in the last WORK_COOLDOWN_HOURS. Returns (amount
+    earned, new balance), or None if they have. A single statement does
+    both the check and the payment, so two /work calls landing at once
+    can't both pay out."""
     earned = random.randint(WORK_MIN, WORK_MAX)
-    today = datetime.datetime.now(EASTERN).date().isoformat()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cooldown_start = now - datetime.timedelta(hours=WORK_COOLDOWN_HOURS)
     with connect() as conn:
         cursor = conn.execute(
             "INSERT INTO wallets (guild_id, user_id, balance, last_work) VALUES (?, ?, ?, ?) "
             "ON CONFLICT (guild_id, user_id) DO UPDATE SET "
             "balance = balance + excluded.balance, last_work = excluded.last_work "
-            "WHERE wallets.last_work IS NULL OR wallets.last_work != excluded.last_work",
-            (str(guild_id), str(user_id), earned, today),
+            "WHERE wallets.last_work IS NULL OR wallets.last_work <= ?",
+            (str(guild_id), str(user_id), earned, _work_timestamp(now), _work_timestamp(cooldown_start)),
         )
         if cursor.rowcount == 0:
             return None
     return earned, get_balance(guild_id, user_id)
 
 
-def time_until_work_resets() -> datetime.timedelta:
-    """How long until /work can be used again -- it resets at midnight
-    Eastern, the same clock the rest of the bot's schedules run on."""
-    now = datetime.datetime.now(EASTERN)
-    tomorrow = datetime.datetime.combine(now.date() + datetime.timedelta(days=1), datetime.time(), EASTERN)
-    return tomorrow - now
+def time_until_next_work(guild_id, user_id) -> datetime.timedelta:
+    """How long until this user's next /work pays -- zero if it already would."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT last_work FROM wallets WHERE guild_id = ? AND user_id = ?",
+            (str(guild_id), str(user_id)),
+        ).fetchone()
+    if not row or not row[0] or 'T' not in row[0]:  # never worked, or only under the old once-a-day rule
+        return datetime.timedelta(0)
+    next_shift = datetime.datetime.fromisoformat(row[0]) + datetime.timedelta(hours=WORK_COOLDOWN_HOURS)
+    return max(next_shift - datetime.datetime.now(datetime.timezone.utc), datetime.timedelta(0))
 
 
 def _transaction(conn: sqlite3.Connection | None):
