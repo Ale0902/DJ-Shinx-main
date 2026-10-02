@@ -1,6 +1,6 @@
-"""Sports betting for the play-money economy: /bet puts coins on one of
-today's NFL or soccer games before it kicks off, and once the game ends
-the bettor gets pinged with how it went.
+"""Sports betting for the play-money economy: /bet puts coins on an NFL
+or soccer game happening today or tomorrow, any time before it kicks off,
+and once the game ends the bettor gets pinged with how it went.
 
 Games, odds and results all come from the same ESPN API sports.py uses,
 across the NFL and every soccer competition /soccer covers. Payouts start
@@ -31,9 +31,13 @@ PLAYER_EDGE_PCT = 2
 # start gets its stake back -- e.g. a postponement ESPN never resolved.
 STALE_AFTER = datetime.timedelta(days=7)
 
-# How long the list of today's games is reused before fetching it again.
-# /bet's autocomplete asks on every keystroke, and it's one scoreboard
-# request per league.
+# Betting on a game opens this many days before game day: 1 means
+# today's and tomorrow's games are on the board.
+DAYS_AHEAD = 1
+
+# How long the list of games open for bets is reused before fetching it
+# again. /bet's autocomplete asks on every keystroke, and it's one
+# scoreboard request per league per day.
 BOARD_TTL_SECONDS = 60
 
 # league key -> (competition name, ESPN scoreboard URL). The key is 'nfl'
@@ -59,7 +63,16 @@ def _sport_emoji(league: str) -> str:
 
 
 def _kickoff(starts_at: datetime.datetime) -> str:
-    return sports._format_time(starts_at.astimezone(sports.EASTERN))
+    """e.g. "1:00 PM ET" for a game today, "Tomorrow 1:00 PM ET", or
+    "Sun 1:00 PM ET" for any other day (an open bet from yesterday)."""
+    local = starts_at.astimezone(sports.EASTERN)
+    days_away = (local.date() - datetime.datetime.now(sports.EASTERN).date()).days
+    time_text = sports._format_time(local)
+    if days_away == 0:
+        return time_text
+    if days_away == 1:
+        return f"Tomorrow {time_text}"
+    return f"{local:%a} {time_text}"
 
 
 def _parse_time(text: str) -> datetime.datetime:
@@ -104,7 +117,7 @@ class Game:
         return {'home': self.home, 'away': self.away, 'draw': "Draw"}[pick]
 
     def describe(self) -> str:
-        """e.g. "🏈 Colts @ Commanders · 1:00 PM ET · NFL" """
+        """e.g. "🏈 Colts @ Commanders · Tomorrow 1:00 PM ET · NFL" """
         return f"{_sport_emoji(self.league)} {self.matchup} · {_kickoff(self.starts_at)} · {LEAGUES[self.league][0]}"
 
     def matches(self, needle: str) -> bool:
@@ -161,7 +174,7 @@ def _payouts(competition: dict, soccer: bool) -> dict[str, int]:
     return {pick: int(total / p * (100 + PLAYER_EDGE_PCT)) for pick, p in probabilities.items()}
 
 
-#=========================--TODAY'S GAMES--==================================#
+#=========================--THE BOARD--======================================#
 
 def _parse_game(league: str, event: dict) -> Game | None:
     try:
@@ -186,32 +199,40 @@ def _parse_game(league: str, event: dict) -> Game | None:
         return None
 
 
-def _league_games(league: str) -> list[Game]:
-    """Every game in this league starting today, Eastern time, whether or
-    not it's still open for bets."""
+def _betting_dates() -> list[datetime.date]:
+    """Today through DAYS_AHEAD days from now, Eastern time."""
     today = datetime.datetime.now(sports.EASTERN).date()
-    events = sports._fetch_scoreboard(LEAGUES[league][1], date=today).get('events', [])
+    return [today + datetime.timedelta(days=i) for i in range(DAYS_AHEAD + 1)]
+
+
+def _league_games(league: str, date: datetime.date) -> list[Game]:
+    """Every game in this league starting on this date, Eastern time,
+    whether or not it's still open for bets."""
+    events = sports._fetch_scoreboard(LEAGUES[league][1], date=date).get('events', [])
     games = [_parse_game(league, event) for event in events]
-    return [g for g in games if g and g.starts_at.astimezone(sports.EASTERN).date() == today]
+    return [g for g in games if g and g.starts_at.astimezone(sports.EASTERN).date() == date]
 
 
 _board: tuple[float, list[Game]] | None = None
 
 
-def todays_games() -> list[Game]:
-    """Every game today still taking bets, soonest first. Fetched at most
-    once per BOARD_TTL_SECONDS; a game that kicks off in the meantime
-    still drops out, since open_for_bets is checked fresh each call."""
+def board() -> list[Game]:
+    """Every game from today through DAYS_AHEAD still taking bets,
+    soonest first. Fetched at most once per BOARD_TTL_SECONDS; a game that
+    kicks off in the meantime still drops out, since open_for_bets is
+    checked fresh each call."""
     global _board
     if _board is None or time.monotonic() - _board[0] >= BOARD_TTL_SECONDS:
-        def fetch(league):
+        def fetch(job):
+            league, date = job
             try:
-                return _league_games(league)
+                return _league_games(league, date)
             except Exception as e:
-                logger.debug(f"sportsbook: couldn't fetch {league} games: {e}")
+                logger.debug(f"sportsbook: couldn't fetch {league} games for {date}: {e}")
                 return []
 
-        games = [game for batch in sports._executor.map(fetch, LEAGUES) for game in batch]
+        jobs = [(league, date) for league in LEAGUES for date in _betting_dates()]
+        games = [game for batch in sports._executor.map(fetch, jobs) for game in batch]
         _board = (time.monotonic(), sorted(games, key=lambda g: g.starts_at))
     return [game for game in _board[1] if game.open_for_bets]
 
@@ -219,14 +240,14 @@ def todays_games() -> list[Game]:
 def game_suggestions(current: str) -> list[tuple[str, str]]:
     """(label, value) choices for /bet's game autocomplete."""
     needle = current.strip().casefold()
-    games = [g for g in todays_games() if g.matches(needle) or needle in LEAGUES[g.league][0].casefold()]
+    games = [g for g in board() if g.matches(needle) or needle in LEAGUES[g.league][0].casefold()]
     return [(g.describe()[:100], g.key) for g in games[:25]]
 
 
 def cached_game(text: str) -> Game | None:
     """The game a /bet game field refers to, from the cached list only --
     for the pick autocomplete, which has to answer fast."""
-    games = todays_games()
+    games = board()
     matches = [g for g in games if g.key == text.strip()] or [g for g in games if g.matches(text.strip().casefold())]
     return matches[0] if len(matches) == 1 else None
 
@@ -239,12 +260,16 @@ def pick_suggestions(game: Game) -> list[tuple[str, str]]:
 
 
 def _fresh_game(league: str, event_id: str) -> Game | None:
-    try:
-        games = _league_games(league)
-    except Exception as e:
-        logger.warning(f"sportsbook: couldn't fetch {league} games: {e}")
-        raise BetError("Couldn't reach ESPN to check that game. Try again in a minute.") from e
-    return next((g for g in games if g.event_id == event_id), None)
+    for date in _betting_dates():
+        try:
+            games = _league_games(league, date)
+        except Exception as e:
+            logger.warning(f"sportsbook: couldn't fetch {league} games for {date}: {e}")
+            raise BetError("Couldn't reach ESPN to check that game. Try again in a minute.") from e
+        game = next((g for g in games if g.event_id == event_id), None)
+        if game:
+            return game
+    return None
 
 
 def resolve_game(text: str) -> Game:
@@ -255,17 +280,17 @@ def resolve_game(text: str) -> Game:
     text = text.strip()
     league, _, event_id = text.partition(':')
     if league not in LEAGUES or not event_id:
-        candidates = [g for g in todays_games() if g.matches(text.casefold())]
+        candidates = [g for g in board() if g.matches(text.casefold())]
         if len(candidates) > 1:
             listed = ", ".join(g.matchup for g in candidates[:5])
-            raise BetError(f"**{text}** matches more than one game today ({listed}). Be more specific.")
+            raise BetError(f"**{text}** matches more than one game on the board ({listed}). Be more specific.")
         league, event_id = (candidates[0].league, candidates[0].event_id) if candidates else (None, None)
 
     game = _fresh_game(league, event_id) if league else None
     if game is None:
         raise BetError(
-            f"Couldn't find a game today matching **{text}**. "
-            f"Start typing a team in /bet to pick from today's games."
+            f"Couldn't find a game open for bets matching **{text}**. "
+            f"Start typing a team in /bet to pick from today's and tomorrow's games."
         )
     if game.state != 'pre' or game.starts_at <= datetime.datetime.now(datetime.timezone.utc):
         raise BetError(f"**{game.matchup}** has already kicked off — betting closes at kickoff.")

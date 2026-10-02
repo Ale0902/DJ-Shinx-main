@@ -899,9 +899,9 @@ def run_discord_bot():
             lines.append(f"{rank} <@{user_id}> — {economy.format_coins(coins)}")
         await ctx.send(embed=_embed("\n".join(lines)))
 
-    @client.hybrid_command(name="bet", description="Bet on one of today's NFL or soccer games before it kicks off")
+    @client.hybrid_command(name="bet", description="Bet on an NFL or soccer game today or tomorrow, before it kicks off")
     @discord.app_commands.describe(
-        game="Start typing a team to pick from today's games",
+        game="Start typing a team to pick from today's and tomorrow's games",
         pick="Who wins — or a draw, for soccer",
         amount="How many coins to bet",
     )
@@ -950,7 +950,7 @@ def run_discord_bot():
     async def mybets(ctx: commands.Context):
         text = sportsbook.open_bets_text(ctx.guild.id, ctx.author.id)
         if text is None:
-            await ctx.send(embed=_embed("You don't have any open bets. /bet to put coins on one of today's games."))
+            await ctx.send(embed=_embed("You don't have any open bets. /bet to put coins on a game today or tomorrow."))
             return
         await ctx.send(embed=_embed(f"🎟️ **Your open bets**\n{text}"))
 
