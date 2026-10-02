@@ -34,13 +34,27 @@ WORK_COOLDOWN_HOURS = 2
 # Flavor text for /work -- unrelated to how much it pays.
 WORK_JOBS = [
     "DJ'd a wedding reception",
-    "walked the neighbor's Shinx",
+    "walked the neighbor's Pokemon",
     "worked a double at the record store",
-    "fixed the Minecraft server (it was DNS)",
+    "Fixed the AWS servers (they fucked up)",
     "untangled every aux cord in the building",
+    "you took a nice poop",
+    "you solved world hunger",
+    "you locked up some criminals",
     "sold mixtapes out of a car trunk",
     "refereed a very heated game of Mario Kart",
     "reorganized the vinyl collection by vibe",
+    "won a game of ARAM",
+    "served up some meatball subs",
+    "your sports bet hit",
+    "you sold your friend's liver on the black market",
+    "you sued the government and won",
+    "you sold your house",
+    "your album was a hit",
+    "you shit on some kids in fortnite",
+    "you took out the target",
+    "your youtube video got some good views",
+    "you saved a nearby planet and its inhabitants were thankful"
 ]
 
 
