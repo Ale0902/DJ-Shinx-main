@@ -6,6 +6,7 @@ import logging
 import datetime
 import threading
 import concurrent.futures
+from dataclasses import dataclass
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -44,6 +45,18 @@ GRID_SESSION_FOR_RACE = {'Race': 'Qual', 'SR': 'SS'}
 # get the same day-of announcement treatment as the main sessions.
 QUALI_DAY_BANNERS = {'Qual': "QUALIFYING", 'SS': "SPRINT QUALIFYING"}
 RACE_DAY_BANNERS = {'Race': "RACE", 'SR': "SPRINT RACE"}
+
+# Qualifying is a knockout in three parts. Everyone runs Q1, the top 10
+# reach Q3, and Q1 and Q2 knock out the same number of cars -- so on the
+# 22-car grid the top 16 reach Q2. A driver's place comes from the last
+# part they reached: their time there, or no time at all if they reached
+# it but didn't set one (a crash, a deleted lap). ESPN's totalTime is just
+# the last nonzero part, so on its own it would show such a driver's Q1
+# time as though it had decided a Q2 place.
+Q3_CARS = 10
+QUALI_PART_STATS = {1: 'qual1TimeMS', 2: 'qual2TimeMS', 3: 'qual3TimeMS'}
+# What each qualifying-type session calls its parts.
+QUALI_PART_PREFIX = {'Qual': 'Q', 'SS': 'SQ'}
 
 # Shared thread pool for fan-out fetches (e.g. one request per driver for a
 # session's results). Reused across calls instead of spinning up a fresh
@@ -254,20 +267,40 @@ def _event_location(event_id: str) -> str | None:
 NO_TIME = '-'
 
 
-def _competitor_result(event_id: str, competition_id: str, competitor: dict) -> tuple[str, str, str, str] | None:
-    """Returns (place, driver_name, total_time, athlete_id) for one driver
-    in a session, or None if it can't be fetched. The athlete id rides
-    along so the row can be coloured by the driver's team -- a session's
-    competitors carry no team of their own."""
+def _competitor_stats(event_id: str, competition_id: str, competitor: dict) -> tuple[str, dict, str] | None:
+    """Returns (driver_name, {stat name: ESPN stat}, athlete_id) for one
+    driver in a session, or None if it can't be fetched. The athlete id
+    rides along so the row can be coloured by the driver's team -- a
+    session's competitors carry no team of their own."""
     try:
         url = f"{F1_CORE_BASE}/events/{event_id}/competitions/{competition_id}/competitors/{competitor['id']}/statistics"
         data = _fetch_json(url)
-        stats = {s['name']: s['displayValue'] for s in data['splits']['categories'][0]['stats']}
-        name = competitor['athlete']['displayName']
-        return stats.get('place', '-'), name, stats.get('totalTime') or NO_TIME, str(competitor['id'])
+        stats = {s['name']: s for s in data['splits']['categories'][0]['stats']}
+        return competitor['athlete']['displayName'], stats, str(competitor['id'])
     except Exception as e:
-        logger.debug(f"_competitor_result failed for competitor {competitor.get('id')}: {e}")
+        logger.debug(f"_competitor_stats failed for competitor {competitor.get('id')}: {e}")
         return None
+
+
+def _quali_time(stats: dict, place: str, field_size: int, prefix: str) -> str | None:
+    """e.g. "Q3 1:35.130", or "Q2 no time" -- the part of qualifying that
+    decided this driver's place, and their time in it (see Q3_CARS). None
+    when ESPN has no per-part times for them yet, so the caller can fall
+    back to treating the row as having no time."""
+    try:
+        position = int(float(place))
+    except (TypeError, ValueError):
+        return None
+    if not any((stats.get(name) or {}).get('value') for name in QUALI_PART_STATS.values()):
+        return None
+    if position <= Q3_CARS:
+        part = 3
+    elif position <= Q3_CARS + (field_size - Q3_CARS) // 2:
+        part = 2
+    else:
+        part = 1
+    stat = stats.get(QUALI_PART_STATS[part]) or {}
+    return f"{prefix}{part} {stat['displayValue'] if stat.get('value') else 'no time'}"
 
 
 def _position(place) -> str:
@@ -282,25 +315,28 @@ def _session_results(event_id: str, competition: dict) -> list[tuple[str, str, s
     """(place, driver, time, athlete id) for every driver in a session,
     position-sorted -- [] unless every driver's result came back, so a
     transient API hiccup is retried on a later poll rather than posting a
-    classification with drivers missing from it."""
+    classification with drivers missing from it. In qualifying the time
+    is labelled with the part that decided the place, e.g. "Q3 1:35.130"."""
     competitors = competition.get('competitors', [])
     if not competitors:
         return []
 
-    def fetch(competitor: dict) -> tuple[str, str, str, str] | None:
-        return _competitor_result(event_id, competition['id'], competitor)
+    def fetch(competitor: dict) -> tuple[str, dict, str] | None:
+        return _competitor_stats(event_id, competition['id'], competitor)
 
-    results = [r for r in _executor.map(fetch, competitors) if r]
-    if len(results) < len(competitors):
+    fetched = [r for r in _executor.map(fetch, competitors) if r]
+    if len(fetched) < len(competitors):
         return []
 
-    def sort_key(result: tuple[str, str, str, str]) -> int:
-        try:
-            return int(float(result[0]))
-        except (TypeError, ValueError):
-            return 999
+    prefix = QUALI_PART_PREFIX.get(competition['type']['abbreviation'])
+    results = []
+    for name, stats, athlete_id in fetched:
+        place = (stats.get('place') or {}).get('displayValue', '-')
+        time = _quali_time(stats, place, len(competitors), prefix) if prefix else None
+        total = (stats.get('totalTime') or {}).get('displayValue')
+        results.append((place, name, time or total or NO_TIME, athlete_id))
 
-    return sorted(results, key=sort_key)
+    return sorted(results, key=lambda result: _position_number(result[0]))
 
 
 def _session_results_table(event_id: str, competition: dict) -> str | None:
@@ -315,7 +351,8 @@ def _results_table(results: list[tuple[str, str, str, str]]) -> str:
     teams = driver_teams([athlete_id for _, _, _, athlete_id in results])
 
     header = f"{'Pos':>3}  {'Driver':<22} Time"
-    rows = [header, '-' * len(header)]
+    width = max([len(header)] + [len(f"{place:>3}  {'':<22} {total_time}") for place, _, total_time, _ in results])
+    rows = [header, '-' * width]
     for place, name, total_time, athlete_id in results:
         driver = _driver_cell(name, 22, teams.get(athlete_id))
         rows.append(f"{place:>3}  {driver} {total_time}")
@@ -323,24 +360,109 @@ def _results_table(results: list[tuple[str, str, str, str]]) -> str:
     return "```ansi\n" + "\n".join(rows) + "\n```"
 
 
-def _grid_recap(event_id: str, competitions: list[dict], race_abbrev: str) -> str | None:
-    grid_abbrev = GRID_SESSION_FOR_RACE.get(race_abbrev)
+def _starting_grid(event_id: str, race: dict) -> dict[str, int]:
+    """{athlete id: grid slot} for a race or sprint: ESPN's startOrder,
+    the grid the cars actually line up on once penalties are applied (a
+    driver who qualified P3 with a ten-place drop shows 13). Empty unless
+    every driver's slot came back."""
+    def fetch(competitor: dict) -> tuple[str, int] | None:
+        try:
+            data = _fetch_json(f"{F1_CORE_BASE}/events/{event_id}/competitions/{race['id']}/competitors/{competitor['id']}")
+            return str(competitor['id']), int(data['startOrder'])
+        except Exception as e:
+            logger.debug(f"_starting_grid failed for competitor {competitor.get('id')}: {e}")
+            return None
+
+    competitors = race.get('competitors', [])
+    slots = [slot for slot in _executor.map(fetch, competitors) if slot]
+    return dict(slots) if competitors and len(slots) == len(competitors) else {}
+
+
+@dataclass
+class GridRecap:
+    """What the race-day banner shows about the grid."""
+    title: str          # "Starting Grid", or "Qualifying Recap" until ESPN has a grid
+    rows: list          # (grid slot, driver, qualifying time, athlete id), front to back
+    dropped: list[str]  # one line per driver starting behind where they qualified
+    qualified: dict     # athlete id -> qualifying place; empty without a grid
+
+
+def _grid_recap(event_id: str, competitions: list[dict], race: dict) -> GridRecap | None:
+    """The starting grid, each driver with their qualifying time, plus who
+    lost places after qualifying (grid penalties, pit-lane starts). The
+    qualifying order instead if ESPN has no grid for the race yet. None if
+    the qualifying results can't be fetched."""
+    grid_abbrev = GRID_SESSION_FOR_RACE.get(race['type']['abbreviation'])
     grid_session = next((c for c in competitions if c['type']['abbreviation'] == grid_abbrev), None)
     if not grid_session:
         return None
-
-    table = _session_results_table(event_id, grid_session)
-    if not table:
+    qualifying = _session_results(event_id, grid_session)
+    if not qualifying:
         return None
 
-    label = SESSION_LABELS.get(grid_abbrev, grid_abbrev)
-    return f"**{label} Recap:**\n{table}"
+    grid = _starting_grid(event_id, race)
+    if not all(athlete_id in grid for _, _, _, athlete_id in qualifying):
+        label = SESSION_LABELS.get(grid_abbrev, grid_abbrev)
+        return GridRecap(f"{label} Recap", qualifying, [], {})
+
+    rows = sorted(
+        ((str(grid[athlete_id]), name, time, athlete_id) for _, name, time, athlete_id in qualifying),
+        key=lambda row: int(row[0]),
+    )
+    qualified = {athlete_id: place for place, _, _, athlete_id in qualifying}
+    dropped = [
+        f"• **{name}**: qualified {_position(qualified[athlete_id])}, starts {_position(slot)}"
+        for slot, name, _, athlete_id in rows
+        if _position_number(slot) > _position_number(qualified[athlete_id])
+    ]
+    return GridRecap("Starting Grid", rows, dropped, qualified)
 
 
-def _race_day_message(event: dict, competitions: list[dict], race_abbrev: str) -> str:
-    recap = _grid_recap(event['id'], competitions, race_abbrev)
-    recap_text = f"\n\n{recap}" if recap else ""
-    return f"# IT'S {RACE_DAY_BANNERS[race_abbrev]} DAY!! 🏎️🏁\n**{event['name']}**{recap_text}"
+def _position_number(place) -> int:
+    try:
+        return int(float(place))
+    except (TypeError, ValueError):
+        return 999
+
+
+def _grid_text(recap: GridRecap) -> str:
+    text = f"**{recap.title}:**\n{_results_table(recap.rows)}"
+    if recap.dropped:
+        text += "\n**Grid drops after qualifying:**\n" + "\n".join(recap.dropped)
+    return text
+
+
+def _race_day_message(event: dict, competitions: list[dict], race: dict, recap: GridRecap | None = None) -> str:
+    recap = recap or _grid_recap(event['id'], competitions, race)
+    recap_text = f"\n\n{_grid_text(recap)}" if recap else ""
+    banner = RACE_DAY_BANNERS[race['type']['abbreviation']]
+    return f"# IT'S {banner} DAY!! 🏎️🏁\n**{event['name']}**{recap_text}"
+
+
+def _grid_changes(shown: list, recap: GridRecap) -> list[str]:
+    """For a reposted grid: the drivers whose own grid drop is new, bigger,
+    smaller or gone since the grid last posted -- penalties landing or
+    being overturned. Everyone shuffling a place to make room for them
+    goes unsaid; the table shows it. Falls back to every change when it's
+    none of those (a qualifying time corrected, say)."""
+    before = {athlete_id: slot for slot, _, _, athlete_id in shown}
+    lines = []
+    for slot, name, _, athlete_id in recap.rows:
+        if athlete_id not in before:
+            continue
+        old, new = _position_number(before[athlete_id]), _position_number(slot)
+        qualified = _position_number(recap.qualified.get(athlete_id))
+        if (new > old and new > qualified) or (new < old and old > qualified):
+            lines.append(f"• **{name}**: {_position(old)} → {_position(new)} (qualified {_position(qualified)})")
+    if lines:
+        return ["Changes since the last grid:", *lines]
+    return _what_changed(shown, [list(row) for row in recap.rows])
+
+
+def _grid_update_message(event: dict, race: dict, recap: GridRecap, changed: list[str]) -> str:
+    """The grid posted again after it changed since the race-day banner."""
+    heading = f"## {_session_label(race)} grid updated — {event['name']}"
+    return "\n".join([heading, *changed]) + f"\n\n{_grid_text(recap)}"
 
 
 def _session_label(competition: dict) -> str:
@@ -449,6 +571,13 @@ def check_f1_updates() -> list[str]:
     # they differ. (Earlier versions kept the same rows as 'first_results'.)
     boards = state.setdefault('boards', state.pop('first_results', {}))
 
+    # The grid each race-day banner showed, for races not yet under way:
+    # {race id: [[slot, driver, qualifying time, athlete id], ...]}. Grid
+    # penalties often land on race morning, after the banner's gone out,
+    # so the grid is checked again every poll until lights out and posted
+    # again whenever it changes.
+    grids = state.setdefault('grids', {})
+
     for competition in competitions:
         comp_id = competition['id']
         abbrev = competition['type']['abbreviation']
@@ -463,8 +592,20 @@ def check_f1_updates() -> list[str]:
             done.append(day_marker)
 
         if abbrev in RACE_DAY_BANNERS and day_marker not in done and today == comp_date.date():
-            messages.append(_race_day_message(event, competitions, abbrev))
+            recap = _grid_recap(event_id, competitions, competition)
+            messages.append(_race_day_message(event, competitions, competition, recap))
             done.append(day_marker)
+            if recap:
+                grids[comp_id] = [list(row) for row in recap.rows]
+        elif comp_id in grids:
+            if competition.get('status', {}).get('type', {}).get('state') != 'pre':
+                del grids[comp_id]  # under way, so the grid can't change any more
+            else:
+                recap = _grid_recap(event_id, competitions, competition)
+                latest = [list(row) for row in recap.rows] if recap else None
+                if latest and latest != grids[comp_id]:
+                    messages.append(_grid_update_message(event, competition, recap, _grid_changes(grids[comp_id], recap)))
+                    grids[comp_id] = latest
 
         results_marker = f"results:{comp_id}"
         final_marker = f"final:{comp_id}"
@@ -530,7 +671,7 @@ def race_day_catch_up() -> list[str]:
                 if results:
                     messages.append(_results_message(event, competition, results))
             elif f"day:{competition['id']}" in done:
-                messages.append(_race_day_message(event, competitions, abbrev))
+                messages.append(_race_day_message(event, competitions, competition))
         return messages
     except Exception as e:
         logger.warning(f"race_day_catch_up failed: {e}")
